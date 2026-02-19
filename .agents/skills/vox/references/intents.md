@@ -1,85 +1,35 @@
 # Vox Intents
 
-把自然语言请求映射到可执行 CLI 命令。
+把自然语言请求映射到业务 playbook。默认先执行业务，缺依赖才安装。
 
-## 1) 初始化与环境
+## 路由表
 
-- 触发词：
-  - "安装 vox"
-  - "环境检查"
-  - "第一次使用"
-- 执行：
+1. 安装/体检类请求：
+   - 触发词：安装、初始化、环境检查、跑不起来
+   - 先读：`references/checklist.md`
+   - 再读：`references/response-contract.md`
+2. 模型请求：
+   - 触发词：下载模型、看缓存、模型路径、模型是否完整
+   - 先读：`references/model-playbook.md`
+3. Profile/采样请求：
+   - 触发词：新建角色、添加样本、管理 profile
+   - 先读：`references/profile-playbook.md`
+4. ASR 请求：
+   - 触发词：转写、语音转文字、流式输出、麦克风转写
+   - 先读：`references/asr-playbook.md`
+5. TTS 克隆请求：
+   - 触发词：克隆声音、生成语音、用某个 profile 读文本
+   - 先读：`references/tts-playbook.md`
+6. 一体化请求：
+   - 触发词：完整流程、先转写再合成、端到端
+   - 先读：`references/pipeline-playbook.md`
+7. 报错/排障请求：
+   - 触发词：为什么失败、重试、查看任务
+   - 先读：`references/failure-loop.md`
 
-```bash
-bash scripts/bootstrap.sh
-bash scripts/self_check.sh
-```
+## 路由规则
 
-## 2) 模型管理
-
-- 触发词：
-  - "下载模型"
-  - "检查模型状态"
-  - "模型路径"
-- 执行：
-
-```bash
-scripts/vox_cmd.sh model status --json
-bash scripts/ensure_model.sh <model-id|asr-auto|tts-default>
-scripts/vox_cmd.sh model path --model <model-id>
-```
-
-## 3) ASR 离线/流式转写
-
-- 触发词：
-  - "转写音频"
-  - "语音转文字"
-  - "流式转写"
-- 执行：
-
-```bash
-bash scripts/ensure_model.sh asr-auto
-scripts/vox_cmd.sh asr transcribe --audio <audio> --lang <lang> --model auto --json
-# 或
-scripts/vox_cmd.sh asr stream --input file --source <audio> --lang <lang> --format ndjson
-```
-
-## 4) 语音克隆
-
-- 触发词：
-  - "克隆声音"
-  - "按这个音色读"
-  - "生成这段语音"
-- 执行：
-
-```bash
-bash scripts/ensure_model.sh tts-default
-scripts/vox_cmd.sh profile create --name <name> --lang zh --json
-scripts/vox_cmd.sh profile add-sample --profile <name> --audio <ref.wav> --text "<ref text>" --json
-scripts/vox_cmd.sh tts clone --profile <name> --text "<target text>" --out <out.wav> --model qwen-tts-1.7b --json
-```
-
-## 5) 一体化流程（ASR + TTS）
-
-- 触发词：
-  - "跑完整流程"
-  - "先转写再克隆"
-- 执行：
-
-```bash
-bash scripts/ensure_model.sh asr-auto
-bash scripts/ensure_model.sh tts-default
-scripts/vox_cmd.sh pipeline run --profile <name> --audio <in.wav> --clone-text "<text>" --lang zh --json
-```
-
-## 6) 任务排障
-
-- 触发词：
-  - "为什么失败"
-  - "看任务详情"
-- 执行：
-
-```bash
-scripts/vox_cmd.sh task list --json
-scripts/vox_cmd.sh task show --id <task_id> --json
-```
+1. 优先选择最窄场景（例如“转写”优先走 ASR playbook，不走 pipeline）。
+2. 用户没明确输出格式时，默认选 JSON（或 `ndjson`）。
+3. 用户只给目标不提供参数时，先给默认参数并明确回显。
+4. 任一命令失败时，执行失败回写并给重试命令。
