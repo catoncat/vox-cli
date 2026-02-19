@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+DEFAULT_VOX_GIT_URL="${VOX_CLI_DEFAULT_GIT_URL:-https://github.com/catoncat/vox-cli.git}"
+
 resolve_package_spec() {
   if [[ -n "${VOX_CLI_GIT_URL:-}" ]]; then
     printf 'git+%s\n' "$VOX_CLI_GIT_URL"
     return
   fi
-  printf '%s\n' "${VOX_CLI_PACKAGE_SPEC:-vox-cli}"
+  if [[ -n "${VOX_CLI_PACKAGE_SPEC:-}" ]]; then
+    printf '%s\n' "$VOX_CLI_PACKAGE_SPEC"
+    return
+  fi
+  printf 'git+%s\n' "$DEFAULT_VOX_GIT_URL"
 }
 
 if command -v vox >/dev/null 2>&1; then

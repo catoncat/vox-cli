@@ -14,6 +14,10 @@ description: "Vox 单入口语音编排技能。用于自然语言完成环境�
 1. 先执行初始化与守卫：
 
 ```bash
+# 无副作用预检（推荐先跑）
+bash scripts/bootstrap.sh --check
+
+# 真实安装与修复
 bash scripts/bootstrap.sh
 ```
 
@@ -76,5 +80,6 @@ scripts/vox_cmd.sh pipeline run --profile narrator --audio ./input.wav --clone-t
 1. 安装优先使用 `uv`。
 2. 默认安装系统依赖：`ffmpeg`、`portaudio`。
 3. CLI 来源：
-   - 优先 `VOX_CLI_PACKAGE_SPEC`（默认 `vox-cli`）。
+   - 优先 `VOX_CLI_PACKAGE_SPEC`（显式指定包）。
    - 若设置 `VOX_CLI_GIT_URL`，使用 `git+<url>` 安装。
+   - 默认回退到 `git+https://github.com/catoncat/vox-cli.git`。

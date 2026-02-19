@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VOX_CMD="$SCRIPT_DIR/vox_cmd.sh"
+MODE="install"
+DEFAULT_VOX_GIT_URL="${VOX_CLI_DEFAULT_GIT_URL:-https://github.com/catoncat/vox-cli.git}"
 
 log() {
   printf '[vox-bootstrap] %s\n' "$*" >&2
@@ -13,12 +15,44 @@ fail() {
   exit "${2:-1}"
 }
 
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  bash scripts/bootstrap.sh [--check]
+
+Options:
+  --check   Run non-mutating checks only (no install).
+EOF
+  exit 2
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --check)
+        MODE="check"
+        shift
+        ;;
+      -h|--help)
+        usage
+        ;;
+      *)
+        usage
+        ;;
+    esac
+  done
+}
+
 resolve_package_spec() {
   if [[ -n "${VOX_CLI_GIT_URL:-}" ]]; then
     printf 'git+%s\n' "$VOX_CLI_GIT_URL"
     return
   fi
-  printf '%s\n' "${VOX_CLI_PACKAGE_SPEC:-vox-cli}"
+  if [[ -n "${VOX_CLI_PACKAGE_SPEC:-}" ]]; then
+    printf '%s\n' "$VOX_CLI_PACKAGE_SPEC"
+    return
+  fi
+  printf 'git+%s\n' "$DEFAULT_VOX_GIT_URL"
 }
 
 ensure_brew_on_path() {
@@ -131,7 +165,61 @@ raise SystemExit(1)
 PY
 }
 
+check_only() {
+  local failed=0
+  ensure_macos_arm64
+  ensure_brew_on_path
+
+  if command -v brew >/dev/null 2>&1; then
+    log "check: brew ok"
+  else
+    log "check: brew missing"
+    failed=1
+  fi
+
+  if command -v uv >/dev/null 2>&1; then
+    log "check: uv ok"
+  else
+    log "check: uv missing"
+    failed=1
+  fi
+
+  if command -v ffmpeg >/dev/null 2>&1; then
+    log "check: ffmpeg ok"
+  else
+    log "check: ffmpeg missing"
+    failed=1
+  fi
+
+  if command -v brew >/dev/null 2>&1 && brew list --versions portaudio >/dev/null 2>&1; then
+    log "check: portaudio ok"
+  else
+    log "check: portaudio missing"
+    failed=1
+  fi
+
+  if command -v vox >/dev/null 2>&1; then
+    log "check: vox command found, validating doctor..."
+    vox doctor --json >/tmp/vox-bootstrap-check-doctor.json && log "check: doctor ok"
+  else
+    log "check: vox command missing (run bootstrap without --check)"
+    failed=1
+  fi
+
+  if [[ "$failed" -ne 0 ]]; then
+    fail "Check mode failed. Run: bash scripts/bootstrap.sh" 7
+  fi
+
+  log "Check mode passed."
+}
+
 main() {
+  parse_args "$@"
+  if [[ "$MODE" == "check" ]]; then
+    check_only
+    return
+  fi
+
   ensure_macos_arm64
   ensure_system_dependencies
   ensure_uv
