@@ -17,7 +17,7 @@ Usage:
   bash scripts/health_gate.sh [options]
 
 Options:
-  --require-model <id|asr-auto|tts-default>   Required model (repeatable)
+  --require-model <id|asr-auto|tts-default>   Scope cache by model list (no verify/pull)
   --require-file <path>                       Required output/input file (repeatable)
   --ttl-hours <int>                           Cache TTL hours (default: 24)
   --force                                     Ignore cached state and run full self-check
@@ -68,9 +68,8 @@ mkdir -p "$STATE_DIR"
 
 TMP_MODELS="$(mktemp)"
 TMP_FILES="$(mktemp)"
-TMP_CONFIG="$(mktemp)"
 TMP_FP="$(mktemp)"
-trap 'rm -f "$TMP_MODELS" "$TMP_FILES" "$TMP_CONFIG" "$TMP_FP"' EXIT
+trap 'rm -f "$TMP_MODELS" "$TMP_FILES" "$TMP_FP"' EXIT
 
 if [[ "${#REQUIRED_MODELS[@]}" -gt 0 ]]; then
   printf '%s\n' "${REQUIRED_MODELS[@]}" | sort -u >"$TMP_MODELS"
@@ -80,15 +79,23 @@ if [[ "${#REQUIRED_FILES[@]}" -gt 0 ]]; then
   printf '%s\n' "${REQUIRED_FILES[@]}" >"$TMP_FILES"
 fi
 
-if command -v vox >/dev/null 2>&1; then
-  if ! vox config show --json >"$TMP_CONFIG" 2>/dev/null; then
+if [[ "${#REQUIRED_MODELS[@]}" -eq 0 ]]; then
+  # Lightweight fingerprint for tasks that do not involve model constraints.
+  printf '{"platform":"%s/%s","fingerprint_mode":"lightweight","required_models":[]}\n' \
+    "$(uname -s)" "$(uname -m)" >"$TMP_FP"
+else
+  TMP_CONFIG="$(mktemp)"
+  trap 'rm -f "$TMP_MODELS" "$TMP_FILES" "$TMP_FP" "$TMP_CONFIG"' EXIT
+
+  if command -v vox >/dev/null 2>&1; then
+    if ! vox config show --json >"$TMP_CONFIG" 2>/dev/null; then
+      echo '{}' >"$TMP_CONFIG"
+    fi
+  else
     echo '{}' >"$TMP_CONFIG"
   fi
-else
-  echo '{}' >"$TMP_CONFIG"
-fi
 
-python3 - "$TMP_CONFIG" "$TMP_MODELS" <<'PY' >"$TMP_FP"
+  python3 - "$TMP_CONFIG" "$TMP_MODELS" <<'PY' >"$TMP_FP"
 import hashlib
 import json
 import platform
@@ -114,9 +121,11 @@ fingerprint = {
     "vox_version": cmd_output(["vox", "version"]),
     "config_hash": hashlib.sha256(config_raw.encode("utf-8")).hexdigest(),
     "required_models": models,
+    "fingerprint_mode": "model-aware",
 }
 print(json.dumps(fingerprint, ensure_ascii=False, sort_keys=True))
 PY
+fi
 
 if [[ "$FORCE" -eq 0 ]] && python3 - "$STATE_FILE" "$TMP_FP" <<'PY'
 import json
@@ -161,9 +170,6 @@ then
 fi
 
 CMD=(bash "$SELF_CHECK")
-for model in "${REQUIRED_MODELS[@]}"; do
-  CMD+=(--require-model "$model")
-done
 for output in "${REQUIRED_FILES[@]}"; do
   CMD+=(--require-file "$output")
 done

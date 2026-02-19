@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VOX_CMD="$SCRIPT_DIR/vox_cmd.sh"
 
-declare -a REQUIRED_MODELS=()
 declare -a REQUIRED_FILES=()
 
 log() {
@@ -14,18 +13,13 @@ log() {
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  bash scripts/self_check.sh [--require-model <id|asr-auto|tts-default>]... [--require-file <path>]...
+  bash scripts/self_check.sh [--require-file <path>]...
 EOF
   exit 2
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --require-model)
-      [[ $# -ge 2 ]] || usage
-      REQUIRED_MODELS+=("$2")
-      shift 2
-      ;;
     --require-file)
       [[ $# -ge 2 ]] || usage
       REQUIRED_FILES+=("$2")
@@ -54,10 +48,6 @@ if payload.get("ok") is not True:
     raise SystemExit(1)
 print("[vox-self-check] doctor ok=true", file=sys.stderr)
 PY
-
-for model in "${REQUIRED_MODELS[@]}"; do
-  bash "$SCRIPT_DIR/ensure_model.sh" "$model" >/dev/null
-done
 
 for output in "${REQUIRED_FILES[@]}"; do
   if [[ ! -f "$output" ]]; then

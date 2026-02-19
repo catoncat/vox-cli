@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VOX_CMD="$SCRIPT_DIR/vox_cmd.sh"
 MODE="install"
-DEFAULT_VOX_GIT_URL="${VOX_CLI_DEFAULT_GIT_URL:-https://github.com/catoncat/vox-cli.git}"
+# shellcheck source=./common.sh
+source "$SCRIPT_DIR/common.sh"
 
 log() {
   printf '[vox-bootstrap] %s\n' "$*" >&2
@@ -41,18 +42,6 @@ parse_args() {
         ;;
     esac
   done
-}
-
-resolve_package_spec() {
-  if [[ -n "${VOX_CLI_PACKAGE_SPEC:-}" ]]; then
-    printf '%s\n' "$VOX_CLI_PACKAGE_SPEC"
-    return
-  fi
-  if [[ -n "${VOX_CLI_GIT_URL:-}" ]]; then
-    printf 'git+%s\n' "$VOX_CLI_GIT_URL"
-    return
-  fi
-  printf 'git+%s\n' "$DEFAULT_VOX_GIT_URL"
 }
 
 ensure_brew_on_path() {
@@ -132,11 +121,44 @@ ensure_system_dependencies() {
 
 install_vox_cli() {
   local package_spec
-  package_spec="$(resolve_package_spec)"
+  package_spec="$(vox_resolve_package_spec)"
   log "Installing Vox CLI with uv: $package_spec"
   uv tool install --force --prerelease allow --with sounddevice "$package_spec" \
     || fail "Failed to install Vox CLI package: $package_spec" 5
   uv tool update-shell >/dev/null 2>&1 || true
+}
+
+check_doctor_payload() {
+  local doctor_json="$1"
+  local mode="$2"
+
+  python3 - "$doctor_json" "$mode" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+mode = sys.argv[2]
+ok = payload.get("ok") is True
+
+if ok:
+    if mode == "check":
+        print("[vox-bootstrap] check: doctor ok=true")
+    else:
+        print("[vox-bootstrap] doctor check passed")
+    raise SystemExit(0)
+
+if mode == "check":
+    print("[vox-bootstrap] check: doctor ok=false")
+else:
+    print("[vox-bootstrap] doctor check failed")
+
+checks = payload.get("checks", {})
+for key, value in checks.items():
+    if value.get("ok", True) is False:
+        print(f"[vox-bootstrap] failed check: {key} -> {value}")
+raise SystemExit(1)
+PY
 }
 
 check_doctor_ok() {
@@ -146,23 +168,7 @@ check_doctor_ok() {
   "$VOX_CMD" doctor --json >"$doctor_json" \
     || fail "vox doctor failed. Run: $VOX_CMD doctor --json" 6
 
-  python3 - "$doctor_json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-if payload.get("ok") is True:
-    print("[vox-bootstrap] doctor check passed")
-    raise SystemExit(0)
-
-print("[vox-bootstrap] doctor check failed")
-checks = payload.get("checks", {})
-for key, value in checks.items():
-    if value.get("ok", True) is False:
-        print(f"[vox-bootstrap] failed check: {key} -> {value}")
-raise SystemExit(1)
-PY
+  check_doctor_payload "$doctor_json" install
 }
 
 check_doctor_ok_via_installed_vox() {
@@ -172,23 +178,7 @@ check_doctor_ok_via_installed_vox() {
   vox doctor --json >"$doctor_json" \
     || fail "vox doctor failed in check mode." 6
 
-  python3 - "$doctor_json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-if payload.get("ok") is True:
-    print("[vox-bootstrap] check: doctor ok=true")
-    raise SystemExit(0)
-
-print("[vox-bootstrap] check: doctor ok=false")
-checks = payload.get("checks", {})
-for key, value in checks.items():
-    if value.get("ok", True) is False:
-        print(f"[vox-bootstrap] failed check: {key} -> {value}")
-raise SystemExit(1)
-PY
+  check_doctor_payload "$doctor_json" check
 }
 
 check_only() {
