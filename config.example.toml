@@ -1,0 +1,16 @@
+[runtime]
+home_dir = "~/.vox"
+
+[hf]
+# 下载端点优先顺序：镜像在前，官方在后
+endpoints = ["https://hf-mirror.com", "https://huggingface.co"]
+# 可选：显式指定 HF 缓存目录
+# cache_dir = "~/.cache/huggingface/hub"
+
+[asr]
+# auto | qwen-asr-1.7b-8bit | qwen-asr-1.7b-4bit
+default_model = "auto"
+memory_threshold_gb = 32
+
+[tts]
+default_model = "qwen-tts-1.7b"

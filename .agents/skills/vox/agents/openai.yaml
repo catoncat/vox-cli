@@ -1,0 +1,6 @@
+interface:
+  display_name: "Vox"
+  short_description: "Single-entry orchestration for Vox voice workflows"
+  default_prompt: "Use $vox to bootstrap environment, ensure models, and execute the right Vox CLI command for my goal."
+policy:
+  allow_implicit_invocation: true
