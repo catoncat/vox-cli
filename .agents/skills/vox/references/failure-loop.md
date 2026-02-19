@@ -14,6 +14,21 @@ bash scripts/log_failure.sh \
   --retry "<retry command>"
 ```
 
+默认会对 token/key/password 做基础脱敏；如需保留原始文本可加 `--no-sanitize`。
+
+## 聚类复盘
+
+定期聚类失败样本，产出可维护的规则候选：
+
+```bash
+bash scripts/failure_digest.sh
+```
+
+输出：
+
+- `~/.vox/agent/state/failure_report.md`
+- `~/.vox/agent/state/failure_report.json`
+
 ## 失败分类
 
 1. `env`：平台或依赖缺失。

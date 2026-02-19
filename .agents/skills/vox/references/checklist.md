@@ -30,6 +30,12 @@ bash scripts/bootstrap.sh --check
 bash scripts/bootstrap.sh
 ```
 
+3. 交付前跑健康门禁（带缓存）：
+
+```bash
+bash scripts/health_gate.sh [--require-model <...>] [--require-file <...>]
+```
+
 ## 交付模板
 
 1. 执行命令：

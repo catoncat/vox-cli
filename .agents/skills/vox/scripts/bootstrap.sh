@@ -44,12 +44,12 @@ parse_args() {
 }
 
 resolve_package_spec() {
-  if [[ -n "${VOX_CLI_GIT_URL:-}" ]]; then
-    printf 'git+%s\n' "$VOX_CLI_GIT_URL"
-    return
-  fi
   if [[ -n "${VOX_CLI_PACKAGE_SPEC:-}" ]]; then
     printf '%s\n' "$VOX_CLI_PACKAGE_SPEC"
+    return
+  fi
+  if [[ -n "${VOX_CLI_GIT_URL:-}" ]]; then
+    printf 'git+%s\n' "$VOX_CLI_GIT_URL"
     return
   fi
   printf 'git+%s\n' "$DEFAULT_VOX_GIT_URL"
@@ -165,6 +165,32 @@ raise SystemExit(1)
 PY
 }
 
+check_doctor_ok_via_installed_vox() {
+  local doctor_json
+  doctor_json="$(mktemp)"
+
+  vox doctor --json >"$doctor_json" \
+    || fail "vox doctor failed in check mode." 6
+
+  python3 - "$doctor_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if payload.get("ok") is True:
+    print("[vox-bootstrap] check: doctor ok=true")
+    raise SystemExit(0)
+
+print("[vox-bootstrap] check: doctor ok=false")
+checks = payload.get("checks", {})
+for key, value in checks.items():
+    if value.get("ok", True) is False:
+        print(f"[vox-bootstrap] failed check: {key} -> {value}")
+raise SystemExit(1)
+PY
+}
+
 check_only() {
   local failed=0
   ensure_macos_arm64
@@ -200,7 +226,9 @@ check_only() {
 
   if command -v vox >/dev/null 2>&1; then
     log "check: vox command found, validating doctor..."
-    vox doctor --json >/tmp/vox-bootstrap-check-doctor.json && log "check: doctor ok"
+    if ! check_doctor_ok_via_installed_vox; then
+      failed=1
+    fi
   else
     log "check: vox command missing (run bootstrap without --check)"
     failed=1

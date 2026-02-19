@@ -19,7 +19,7 @@ description: "Vox 单入口语音编排技能。用于自然语言完成 profile
 3. 执行业务命令：
    - 按对应 playbook 执行（见下方 references）。
 4. 交付前自检：
-   - 强制执行 `self_check`。
+   - 强制执行 `health_gate`（优先用缓存状态，必要时才跑全量自检）。
 5. 失败回写：
    - 记录失败样本到用户本地日志。
 
@@ -42,14 +42,25 @@ bash scripts/ensure_model.sh <model_id|asr-auto|tts-default>
 ## 交付前自检
 
 ```bash
-bash scripts/self_check.sh [--require-model <...>] [--require-file <...>]
+# 推荐：带状态缓存（默认 24h TTL）
+bash scripts/health_gate.sh [--require-model <...>] [--require-file <...>]
+
+# 强制全量自检（忽略缓存）
+bash scripts/health_gate.sh --force [--require-model <...>] [--require-file <...>]
 ```
 
 ## 失败回写
 
 ```bash
 bash scripts/log_failure.sh --stage "<stage>" --command "<cmd>" --error "<msg>" [--retry "<retry-cmd>"]
+bash scripts/failure_digest.sh
 ```
+
+状态文件：
+
+- 健康状态：`~/.vox/agent/state/health.json`
+- 失败日志：`~/.vox/agent/failures.jsonl`
+- 失败报告：`~/.vox/agent/state/failure_report.md`
 
 ## 必读 References（按场景加载）
 

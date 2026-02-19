@@ -8,6 +8,7 @@
    - 触发词：安装、初始化、环境检查、跑不起来
    - 先读：`references/checklist.md`
    - 再读：`references/response-contract.md`
+   - 优先命令：`bash scripts/bootstrap.sh --check`、`bash scripts/health_gate.sh`
 2. 模型请求：
    - 触发词：下载模型、看缓存、模型路径、模型是否完整
    - 先读：`references/model-playbook.md`
