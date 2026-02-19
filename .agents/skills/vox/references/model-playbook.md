@@ -13,7 +13,7 @@ scripts/vox_cmd.sh model status --json
 2. 解析目标模型：
    - ASR 默认：`asr-auto`
    - TTS 默认：`tts-default`
-   - 指定模型：`qwen-asr-1.7b-4bit` 等
+   - 指定模型：`qwen-asr-1.7b-4bit`、`qwen-tts-1.7b-customvoice-8bit`、`qwen-tts-1.7b-voicedesign-8bit` 等
 
 3. 保证模型可用：
 

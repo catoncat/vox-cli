@@ -44,7 +44,7 @@ from .db import (
 from .models import MODEL_REGISTRY
 from .services.asr_service import stream_to_ndjson, stream_transcribe_file, transcribe_file
 from .services.model_service import ensure_model_downloaded, list_model_statuses, resolve_model
-from .services.tts_service import clone_to_file
+from .services.tts_service import clone_to_file, custom_to_file, design_to_file
 
 console = Console()
 err_console = Console(stderr=True)
@@ -501,6 +501,102 @@ def tts_clone_cmd(
                     model_id=model,
                     seed=seed,
                     instruct=instruct,
+                )
+                complete_task(conn, task.id, result)
+            except Exception as e:
+                fail_task(conn, task.id, str(e))
+                _fail(str(e))
+
+    payload = {'task_id': task.id, **result}
+    if as_json:
+        _print_json(payload)
+    else:
+        console.print(payload)
+
+
+@tts_app.command('custom')
+def tts_custom_cmd(
+    ctx: typer.Context,
+    text: str = typer.Option(..., '--text'),
+    out: Path = typer.Option(..., '--out'),
+    speaker: str = typer.Option('Vivian', '--speaker'),
+    language: str = typer.Option('auto', '--language'),
+    instruct: str | None = typer.Option(None, '--instruct'),
+    model: str = typer.Option('qwen-tts-1.7b-customvoice-8bit', '--model'),
+    seed: int | None = typer.Option(None, '--seed'),
+    as_json: bool = typer.Option(False, '--json'),
+) -> None:
+    state: AppState = ctx.obj
+
+    with connect(state.db_path) as conn:
+        with tracked_task(
+            conn,
+            'tts_custom',
+            model,
+            {
+                'text_preview': text[:50],
+                'out': str(out),
+                'speaker': speaker,
+                'language': language,
+            },
+        ) as task:
+            try:
+                result = custom_to_file(
+                    config=state.config,
+                    text=text,
+                    output_path=out,
+                    model_id=model,
+                    speaker=speaker,
+                    language=language,
+                    instruct=instruct,
+                    seed=seed,
+                )
+                complete_task(conn, task.id, result)
+            except Exception as e:
+                fail_task(conn, task.id, str(e))
+                _fail(str(e))
+
+    payload = {'task_id': task.id, **result}
+    if as_json:
+        _print_json(payload)
+    else:
+        console.print(payload)
+
+
+@tts_app.command('design')
+def tts_design_cmd(
+    ctx: typer.Context,
+    text: str = typer.Option(..., '--text'),
+    instruct: str = typer.Option(..., '--instruct'),
+    out: Path = typer.Option(..., '--out'),
+    language: str = typer.Option('auto', '--language'),
+    model: str = typer.Option('qwen-tts-1.7b-voicedesign-8bit', '--model'),
+    seed: int | None = typer.Option(None, '--seed'),
+    as_json: bool = typer.Option(False, '--json'),
+) -> None:
+    state: AppState = ctx.obj
+
+    with connect(state.db_path) as conn:
+        with tracked_task(
+            conn,
+            'tts_design',
+            model,
+            {
+                'text_preview': text[:50],
+                'instruct_preview': instruct[:50],
+                'out': str(out),
+                'language': language,
+            },
+        ) as task:
+            try:
+                result = design_to_file(
+                    config=state.config,
+                    text=text,
+                    output_path=out,
+                    model_id=model,
+                    instruct=instruct,
+                    language=language,
+                    seed=seed,
                 )
                 complete_task(conn, task.id, result)
             except Exception as e:

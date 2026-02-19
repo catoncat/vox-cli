@@ -18,8 +18,8 @@
 4. ASR 请求：
    - 触发词：转写、语音转文字、流式输出、麦克风转写
    - 先读：`references/asr-playbook.md`
-5. TTS 克隆请求：
-   - 触发词：克隆声音、生成语音、用某个 profile 读文本
+5. TTS 合成请求：
+   - 触发词：克隆声音、生成语音、用某个 profile 读文本、指定 speaker 说话、按描述设计声音
    - 先读：`references/tts-playbook.md`
 6. 一体化请求：
    - 触发词：完整流程、先转写再合成、端到端

@@ -20,6 +20,42 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         repo_id='mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16',
         kind='tts',
     ),
+    'qwen-tts-1.7b-base-8bit': ModelSpec(
+        model_id='qwen-tts-1.7b-base-8bit',
+        repo_id='mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit',
+        kind='tts',
+        quantization='8bit',
+    ),
+    'qwen-tts-1.7b-customvoice-8bit': ModelSpec(
+        model_id='qwen-tts-1.7b-customvoice-8bit',
+        repo_id='mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit',
+        kind='tts',
+        quantization='8bit',
+    ),
+    'qwen-tts-1.7b-voicedesign-8bit': ModelSpec(
+        model_id='qwen-tts-1.7b-voicedesign-8bit',
+        repo_id='mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit',
+        kind='tts',
+        quantization='8bit',
+    ),
+    'qwen-tts-0.6b-base-8bit': ModelSpec(
+        model_id='qwen-tts-0.6b-base-8bit',
+        repo_id='mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit',
+        kind='tts',
+        quantization='8bit',
+    ),
+    'qwen-tts-0.6b-customvoice-8bit': ModelSpec(
+        model_id='qwen-tts-0.6b-customvoice-8bit',
+        repo_id='mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit',
+        kind='tts',
+        quantization='8bit',
+    ),
+    'qwen-tts-0.6b-voicedesign-8bit': ModelSpec(
+        model_id='qwen-tts-0.6b-voicedesign-8bit',
+        repo_id='mlx-community/Qwen3-TTS-12Hz-0.6B-VoiceDesign-8bit',
+        kind='tts',
+        quantization='8bit',
+    ),
     'qwen-asr-1.7b-8bit': ModelSpec(
         model_id='qwen-asr-1.7b-8bit',
         repo_id='mlx-community/Qwen3-ASR-1.7B-8bit',

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from collections.abc import Callable, Generator
 from pathlib import Path
 import inspect
 import os
@@ -11,6 +13,57 @@ from ..audio import combine_samples, stable_hash
 from ..config import VoxConfig, get_cache_dir
 from ..db import list_profile_samples, resolve_profile
 from ..services.model_service import ensure_model_downloaded, resolve_model
+
+
+@contextmanager
+def _temporary_hf_endpoint(endpoint: str):
+    previous_endpoint = os.getenv('HF_ENDPOINT')
+    os.environ['HF_ENDPOINT'] = endpoint
+    try:
+        yield
+    finally:
+        if previous_endpoint is None:
+            os.environ.pop('HF_ENDPOINT', None)
+        else:
+            os.environ['HF_ENDPOINT'] = previous_endpoint
+
+
+def _build_supported_kwargs(fn: Callable, raw_kwargs: dict[str, object]) -> dict[str, object]:
+    sig = inspect.signature(fn)
+    supported: dict[str, object] = {}
+    for key, value in raw_kwargs.items():
+        if value is None:
+            continue
+        if key in sig.parameters:
+            supported[key] = value
+    return supported
+
+
+def _run_generation_to_file(
+    method: Callable,
+    output_path: Path,
+    **raw_kwargs: object,
+) -> tuple[int, float]:
+    kwargs = _build_supported_kwargs(method, raw_kwargs)
+
+    chunks: list[np.ndarray] = []
+    sample_rate = 24000
+    results: Generator = method(**kwargs)
+    for result in results:
+        audio = getattr(result, 'audio', None)
+        if audio is None:
+            continue
+        chunks.append(np.asarray(audio, dtype=np.float32))
+        sample_rate = int(getattr(result, 'sample_rate', sample_rate))
+
+    if not chunks:
+        raise RuntimeError('TTS produced no audio chunks')
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    final_audio = np.concatenate(chunks)
+    sf.write(str(output_path), final_audio, sample_rate)
+    duration_sec = float(len(final_audio) / sample_rate)
+    return sample_rate, duration_sec
 
 
 def _build_prompt_audio_and_text(
@@ -58,55 +111,124 @@ def clone_to_file(
 
     prompt_audio, prompt_text, profile_id = _build_prompt_audio_and_text(config, profile_id_or_name, conn)
 
-    previous_endpoint = os.getenv('HF_ENDPOINT')
     active_endpoint = str(ensure_result['endpoint'] or config.hf.endpoints[0])
-    os.environ['HF_ENDPOINT'] = active_endpoint
 
-    try:
+    with _temporary_hf_endpoint(active_endpoint):
         from mlx_audio.tts.utils import load_model
 
         model = load_model(spec.repo_id)
 
-        sig = inspect.signature(model.generate)
-        kwargs: dict[str, object] = {}
-
-        if 'ref_audio' in sig.parameters:
-            kwargs['ref_audio'] = str(prompt_audio)
-        if 'ref_text' in sig.parameters:
-            kwargs['ref_text'] = prompt_text
-        if instruct and 'instruct' in sig.parameters:
-            kwargs['instruct'] = instruct
-        if seed is not None and 'seed' in sig.parameters:
-            kwargs['seed'] = seed
-
-        chunks: list[np.ndarray] = []
-        sample_rate = 24000
-        for result in model.generate(text=text, **kwargs):
-            audio = getattr(result, 'audio', None)
-            if audio is None:
-                continue
-            chunks.append(np.asarray(audio, dtype=np.float32))
-            sample_rate = int(getattr(result, 'sample_rate', sample_rate))
-
-        if not chunks:
-            raise RuntimeError('TTS produced no audio chunks')
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        final_audio = np.concatenate(chunks)
-        sf.write(str(output_path), final_audio, sample_rate)
+        sample_rate, duration_sec = _run_generation_to_file(
+            model.generate,
+            output_path=output_path,
+            text=text,
+            ref_audio=str(prompt_audio),
+            ref_text=prompt_text,
+            instruct=instruct,
+            seed=seed,
+        )
 
         return {
             'output_path': str(output_path),
             'sample_rate': sample_rate,
-            'duration_sec': float(len(final_audio) / sample_rate),
+            'duration_sec': duration_sec,
             'model_id': spec.model_id,
             'repo_id': spec.repo_id,
             'profile_id': profile_id,
             'endpoint': active_endpoint,
             'prompt_audio': str(prompt_audio),
         }
-    finally:
-        if previous_endpoint is None:
-            os.environ.pop('HF_ENDPOINT', None)
-        else:
-            os.environ['HF_ENDPOINT'] = previous_endpoint
+
+
+def custom_to_file(
+    config: VoxConfig,
+    text: str,
+    output_path: Path,
+    model_id: str | None,
+    speaker: str,
+    language: str,
+    instruct: str | None,
+    seed: int | None,
+) -> dict:
+    spec = resolve_model(config, model_id, kind='tts')
+    ensure_result = ensure_model_downloaded(config, spec, allow_download=True)
+    active_endpoint = str(ensure_result['endpoint'] or config.hf.endpoints[0])
+
+    with _temporary_hf_endpoint(active_endpoint):
+        from mlx_audio.tts.utils import load_model
+
+        model = load_model(spec.repo_id)
+        method = getattr(model, 'generate_custom_voice', None)
+        if method is None:
+            raise RuntimeError(
+                f'Model {spec.model_id} does not support custom voice generation. '
+                'Use a `*-customvoice-*` TTS model.'
+            )
+
+        sample_rate, duration_sec = _run_generation_to_file(
+            method,
+            output_path=output_path,
+            text=text,
+            speaker=speaker,
+            language=language,
+            instruct=instruct,
+            seed=seed,
+        )
+
+        return {
+            'output_path': str(output_path),
+            'sample_rate': sample_rate,
+            'duration_sec': duration_sec,
+            'model_id': spec.model_id,
+            'repo_id': spec.repo_id,
+            'mode': 'custom_voice',
+            'speaker': speaker,
+            'language': language,
+            'endpoint': active_endpoint,
+        }
+
+
+def design_to_file(
+    config: VoxConfig,
+    text: str,
+    output_path: Path,
+    model_id: str | None,
+    instruct: str,
+    language: str,
+    seed: int | None,
+) -> dict:
+    spec = resolve_model(config, model_id, kind='tts')
+    ensure_result = ensure_model_downloaded(config, spec, allow_download=True)
+    active_endpoint = str(ensure_result['endpoint'] or config.hf.endpoints[0])
+
+    with _temporary_hf_endpoint(active_endpoint):
+        from mlx_audio.tts.utils import load_model
+
+        model = load_model(spec.repo_id)
+        method = getattr(model, 'generate_voice_design', None)
+        if method is None:
+            raise RuntimeError(
+                f'Model {spec.model_id} does not support voice design generation. '
+                'Use a `*-voicedesign-*` TTS model.'
+            )
+
+        sample_rate, duration_sec = _run_generation_to_file(
+            method,
+            output_path=output_path,
+            text=text,
+            instruct=instruct,
+            language=language,
+            seed=seed,
+        )
+
+        return {
+            'output_path': str(output_path),
+            'sample_rate': sample_rate,
+            'duration_sec': duration_sec,
+            'model_id': spec.model_id,
+            'repo_id': spec.repo_id,
+            'mode': 'voice_design',
+            'language': language,
+            'instruct': instruct,
+            'endpoint': active_endpoint,
+        }

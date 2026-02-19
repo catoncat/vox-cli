@@ -3,7 +3,7 @@
 独立于任何现有业务项目的本地语音编排 CLI，面向 Apple Silicon + MLX：
 
 - ASR：`Qwen3-ASR-1.7B`（`4bit/8bit`）
-- TTS：`Qwen3-TTS-1.7B`（语音克隆）
+- TTS：`Qwen3-TTS`（`clone / custom / design`，含 `1.7B/0.6B` 变体）
 - 下载策略：默认国内镜像 `hf-mirror`，失败自动回退官方 Hugging Face
 - 缓存策略：优先复用本地 Hugging Face 缓存，避免重复下载
 
@@ -80,12 +80,17 @@ uv run vox doctor --json
 
 内置模型：
 
-1. `qwen-tts-1.7b`
-   - `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16`
-2. `qwen-asr-1.7b-8bit`
-   - `mlx-community/Qwen3-ASR-1.7B-8bit`
-3. `qwen-asr-1.7b-4bit`
-   - `mlx-community/Qwen3-ASR-1.7B-4bit`
+1. TTS：
+   - `qwen-tts-1.7b` -> `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16`（默认 clone）
+   - `qwen-tts-1.7b-base-8bit` -> `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit`
+   - `qwen-tts-1.7b-customvoice-8bit` -> `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit`
+   - `qwen-tts-1.7b-voicedesign-8bit` -> `mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit`
+   - `qwen-tts-0.6b-base-8bit` -> `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit`
+   - `qwen-tts-0.6b-customvoice-8bit` -> `mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit`
+   - `qwen-tts-0.6b-voicedesign-8bit` -> `mlx-community/Qwen3-TTS-12Hz-0.6B-VoiceDesign-8bit`
+2. ASR：
+   - `qwen-asr-1.7b-8bit` -> `mlx-community/Qwen3-ASR-1.7B-8bit`
+   - `qwen-asr-1.7b-4bit` -> `mlx-community/Qwen3-ASR-1.7B-4bit`
 
 ### 4.2 ASR 自动选型
 
@@ -283,7 +288,7 @@ uv run vox asr stream \
 
 ## 7.4 `tts`
 
-### 语音克隆
+### 语音克隆（`clone`）
 
 ```bash
 uv run vox tts clone \
@@ -297,6 +302,37 @@ uv run vox tts clone \
 
 - `--seed`
 - `--instruct`（仅当底层模型接口支持时生效）
+
+### 预置说话人合成（`custom`）
+
+```bash
+uv run vox tts custom \
+  --text "你好，这是 Vivian 的示例语音" \
+  --speaker Vivian \
+  --language auto \
+  --instruct "开心，语速自然" \
+  --out ./custom.wav \
+  --model qwen-tts-1.7b-customvoice-8bit
+```
+
+可选参数：
+
+- `--seed`（仅当底层模型接口支持时生效）
+
+### 声音设计合成（`design`）
+
+```bash
+uv run vox tts design \
+  --text "你好，这是按描述设计出来的声音" \
+  --instruct "低沉男声，播音腔，语气稳重" \
+  --language auto \
+  --out ./design.wav \
+  --model qwen-tts-1.7b-voicedesign-8bit
+```
+
+可选参数：
+
+- `--seed`（仅当底层模型接口支持时生效）
 
 ## 7.5 `pipeline`
 
