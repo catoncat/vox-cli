@@ -134,7 +134,7 @@ install_vox_cli() {
   local package_spec
   package_spec="$(resolve_package_spec)"
   log "Installing Vox CLI with uv: $package_spec"
-  uv tool install --force --with sounddevice "$package_spec" \
+  uv tool install --force --prerelease allow --with sounddevice "$package_spec" \
     || fail "Failed to install Vox CLI package: $package_spec" 5
   uv tool update-shell >/dev/null 2>&1 || true
 }

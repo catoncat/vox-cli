@@ -25,4 +25,4 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 PACKAGE_SPEC="$(resolve_package_spec)"
-exec uv tool run --from "$PACKAGE_SPEC" vox "$@"
+exec uv tool run --prerelease allow --from "$PACKAGE_SPEC" vox "$@"
