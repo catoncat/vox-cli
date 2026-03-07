@@ -1,6 +1,6 @@
 # Vox Intents
 
-把自然语言请求映射到业务 playbook。默认先执行业务，缺依赖才安装。
+把自然语言请求先映射到场景，再由 `references/orchestration-matrix.md` 选择最小 happy path。默认先执行业务，缺依赖才安装。
 
 ## 路由表
 
@@ -8,7 +8,7 @@
    - 触发词：安装、初始化、环境检查、跑不起来
    - 先读：`references/checklist.md`
    - 再读：`references/response-contract.md`
-   - 优先命令：`bash scripts/bootstrap.sh --check`、`bash scripts/health_gate.sh`
+   - 优先命令：体检优先 `bash scripts/health_gate.sh`；仅在命令不可用、依赖缺失或用户明确要求安装检查时才用 `bash scripts/bootstrap.sh --check`
 2. 模型请求：
    - 触发词：下载模型、看缓存、模型路径、模型是否完整
    - 先读：`references/model-playbook.md`
@@ -30,7 +30,12 @@
 
 ## 路由规则
 
-1. 优先选择最窄场景（例如“转写”优先走 ASR playbook，不走 pipeline）。
-2. 用户没明确输出格式时，默认选 JSON（或 `ndjson`）。
-3. 用户只给目标不提供参数时，先给默认参数并明确回显。
-4. 任一命令失败时，执行失败回写并给重试命令。
+1. 先判定场景，再按 `references/orchestration-matrix.md` 选择该场景的最小 happy path。
+2. 优先选择最窄场景（例如“转写”优先走 ASR playbook，不走 pipeline）。
+3. 用户没明确输出格式时，默认选 JSON（或 `ndjson`）。
+4. 用户只给目标不提供参数时，先给默认参数并明确回显。
+5. 普通业务请求先走最小业务路径，不先运行 `bootstrap.sh --check`；仅在业务命令报依赖缺失、命令不存在或用户明确要求体检时，才进入预检/安装流程。
+6. 重操作场景只通过 `ensure_model` 处理模型准备，不把 `doctor` 或安装链路塞进主流程。
+7. 名称、profile、模型不明确时，先查本地状态一次，再做匹配；不要硬编码别名。
+8. 排查 skill 编排问题时，默认使用静态审查和轻量命令；禁止擅自做压测、基准测试或重复重推理，除非用户明确要求。
+9. 任一命令失败时，执行失败回写并给重试命令。

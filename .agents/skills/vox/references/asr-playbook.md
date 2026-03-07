@@ -2,15 +2,27 @@
 
 用于离线转写、流式转写和麦克风模式。
 
-## 预处理
+## 场景定位
 
-1. 先保证 ASR 模型可用：
+这是重操作场景：先 `ensure_model`，再执行一次目标 ASR 命令，交付前再过门禁。
+
+## 最小 happy path
+
+1. 执行：
 
 ```bash
 bash scripts/ensure_model.sh asr-auto
 ```
 
-2. 交付前要求 JSON/ndjson 优先。
+2. 执行一次目标 ASR 命令。
+3. 交付前执行一次：
+
+```bash
+bash scripts/health_gate.sh
+```
+
+4. 仅当命令不可用、依赖缺失或环境错误时，才回退到 `bootstrap.sh --check` / `bootstrap.sh`。
+5. 排查编排问题时，不要为了“确认一下”重复跑长音频、长时流式任务或压力测试。
 
 ## 离线转写
 
@@ -44,8 +56,9 @@ scripts/vox_cmd.sh asr stream \
   --format ndjson
 ```
 
-## 校验点
+## 交付要求
 
 1. 转写结果不为空。
 2. 返回 `task_id`（若为 `--json`）。
 3. 输出模式符合用户需求（文本或 NDJSON）。
+4. 交付前由 `health_gate` 或显式 `doctor` 覆盖到 `ok=true`；不要在主命令前重复跑。

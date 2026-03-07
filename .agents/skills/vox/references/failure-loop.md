@@ -29,15 +29,16 @@ bash scripts/failure_digest.sh
 - `~/.vox/agent/state/failure_report.md`
 - `~/.vox/agent/state/failure_report.json`
 
-## 失败分类
+## 失败分类与回退
 
-1. `env`：平台或依赖缺失。
-2. `model`：未下载、未校验、下载失败。
-3. `input`：路径错误、音频不合法、参数缺失。
-4. `runtime`：执行异常、输出缺失。
+1. `env`：平台或依赖缺失 → 才回退 `bootstrap.sh --check` / `bootstrap.sh`
+2. `model`：未下载、未校验、下载失败 → 先走 `ensure_model`
+3. `input`：路径错误、音频不合法、参数缺失 → 优先修参数/路径
+4. `runtime`：执行异常、输出缺失 → 看日志、状态文件、命令帮助，再决定是否最小复现
 
 ## 闭环要求
 
 1. 每次失败都要给可执行重试命令。
-2. 相同失败重复出现时，把对应预检规则补进 `checklist.md`。
-3. 新场景稳定后，把固定流程补进对应 playbook。
+2. 环境/安装类重复失败，再补 `checklist.md`。
+3. 场景业务类重复失败，优先补对应 `playbook`、`intents.md` 或 `orchestration-matrix.md`。
+4. 若失败根因是场景误判、过度预检或编排混乱，优先修编排文件；不要把广谱预检塞回主流程。

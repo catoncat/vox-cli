@@ -1,6 +1,6 @@
 interface:
   display_name: "Vox"
-  short_description: "Natural-language profile, ASR, clone, and pipeline control"
-  default_prompt: "Use $vox to manage profiles, add samples, transcribe audio, and synthesize speech with the right Vox CLI workflow."
+  short_description: "Route Vox CLI workflows for profile, model, ASR, TTS, pipeline, and troubleshooting"
+  default_prompt: "Use $vox to route the request to the right Vox CLI workflow for profiles, models, ASR, TTS, pipeline, installation checks, or troubleshooting."
 policy:
   allow_implicit_invocation: true
