@@ -27,6 +27,7 @@ from .config import (
     get_total_memory_gb,
     load_config,
     resolve_asr_model_id,
+    resolve_tts_model_id,
 )
 from .db import (
     add_profile_sample,
@@ -42,6 +43,7 @@ from .db import (
     tracked_task,
 )
 from .models import MODEL_REGISTRY
+from .runtime import RuntimeExecutionOptions
 from .services.asr_service import stream_to_ndjson, stream_transcribe_file, transcribe_file
 from .services.dictation_service import launch_dictation
 from .services.realtime_asr_service import run_realtime_session_server
@@ -59,6 +61,27 @@ err_console = Console(stderr=True)
 class AppState:
     config: VoxConfig
     db_path: Path
+
+
+def _build_runtime_options(
+    state: AppState,
+    *,
+    task_type: str,
+    wait_for_lock: bool | None,
+    wait_timeout: int | None,
+    task_id: str | None = None,
+    command_summary: str | None = None,
+) -> RuntimeExecutionOptions:
+    wait_enabled = state.config.runtime.wait_for_lock if wait_for_lock is None else wait_for_lock
+    timeout_sec = wait_timeout if wait_timeout is not None else state.config.runtime.lock_wait_timeout_sec
+    return RuntimeExecutionOptions(
+        wait_for_lock=wait_enabled,
+        wait_timeout_sec=max(1, timeout_sec),
+        task_id=task_id,
+        task_type=task_type,
+        command_summary=command_summary or ' '.join(sys.argv),
+        log=lambda message: err_console.print(message),
+    )
 
 
 def _print_json(payload: dict | list) -> None:
@@ -178,6 +201,7 @@ def dictation_cmd(
     port: int | None = typer.Option(None, '--port'),
     rebuild_native: bool = typer.Option(False, '--rebuild-native'),
     partial_interval_ms: int = typer.Option(0, '--partial-interval-ms', min=0),
+    verbose: bool = typer.Option(False, '--verbose', help='Print verbose dictation helper logs'),
 ) -> None:
     state: AppState = ctx.obj
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
@@ -192,6 +216,7 @@ def dictation_cmd(
             port=port,
             rebuild_native=rebuild_native,
             partial_interval_ms=partial_interval_ms,
+            verbose=verbose,
         )
     except Exception as e:
         _fail(str(e))
@@ -342,11 +367,12 @@ def model_status_cmd(ctx: typer.Context, as_json: bool = typer.Option(False, '--
     table.add_column('Incomplete')
     table.add_column('Cache Dir')
     for row in statuses:
+        incomplete = row['has_incomplete']
         table.add_row(
             row['model_id'],
             'yes' if row['downloaded'] else 'no',
             'yes' if row['verified'] else 'no',
-            'yes' if row['has_incomplete'] else 'no',
+            '?' if incomplete is None else ('yes' if incomplete else 'no'),
             row['cache_dir'],
         )
     console.print(table)
@@ -360,7 +386,7 @@ def model_verify_cmd(
 ) -> None:
     state: AppState = ctx.obj
     spec = resolve_model(state.config, model)
-    cache = inspect_cache(spec, get_hf_cache_dir(state.config))
+    cache = inspect_cache(spec, get_hf_cache_dir(state.config), deep=True)
     payload = {
         'model_id': spec.model_id,
         'repo_id': spec.repo_id,
@@ -395,6 +421,8 @@ def model_path_cmd(ctx: typer.Context, model: str = typer.Option(..., '--model')
 def model_pull_cmd(
     ctx: typer.Context,
     model: str = typer.Option(..., '--model'),
+    wait: bool | None = typer.Option(None, '--wait/--no-wait'),
+    wait_timeout: int | None = typer.Option(None, '--wait-timeout', min=1),
     as_json: bool = typer.Option(False, '--json'),
 ) -> None:
     state: AppState = ctx.obj
@@ -403,7 +431,20 @@ def model_pull_cmd(
     with connect(state.db_path) as conn:
         with tracked_task(conn, 'model_pull', spec.model_id, {'repo_id': spec.repo_id}) as task:
             try:
-                result = ensure_model_downloaded(state.config, spec, allow_download=True)
+                runtime_options = _build_runtime_options(
+                    state,
+                    task_type='model_pull',
+                    task_id=task.id,
+                    wait_for_lock=wait,
+                    wait_timeout=wait_timeout,
+                    command_summary=f'model pull --model {spec.model_id}',
+                )
+                result = ensure_model_downloaded(
+                    state.config,
+                    spec,
+                    allow_download=True,
+                    runtime_options=runtime_options,
+                )
                 complete_task(conn, task.id, result)
             except Exception as e:
                 fail_task(conn, task.id, str(e))
@@ -515,18 +556,41 @@ def asr_session_server_cmd(
     lang: str = typer.Option('auto', '--lang'),
     model: str = typer.Option('auto', '--model'),
     sample_rate: int = typer.Option(16000, '--sample-rate'),
+    wait: bool | None = typer.Option(None, '--wait/--no-wait'),
+    wait_timeout: int | None = typer.Option(None, '--wait-timeout', min=1),
 ) -> None:
     state: AppState = ctx.obj
     model_arg = None if model == 'auto' else model
     resolved_model = resolve_asr_model_id(state.config, model_arg)
-    run_realtime_session_server(
-        config=state.config,
-        model_id=resolved_model,
-        language=lang,
-        host=host,
-        port=port,
-        sample_rate=sample_rate,
-    )
+    with connect(state.db_path) as conn:
+        with tracked_task(
+            conn,
+            'asr_session_server',
+            resolved_model,
+            {'host': host, 'port': port, 'lang': lang},
+        ) as task:
+            try:
+                runtime_options = _build_runtime_options(
+                    state,
+                    task_type='asr_session_server',
+                    task_id=task.id,
+                    wait_for_lock=wait,
+                    wait_timeout=wait_timeout,
+                    command_summary=f'asr session-server --model {resolved_model}',
+                )
+                run_realtime_session_server(
+                    config=state.config,
+                    model_id=resolved_model,
+                    language=lang,
+                    host=host,
+                    port=port,
+                    sample_rate=sample_rate,
+                    runtime_options=runtime_options,
+                )
+                complete_task(conn, task.id, {'host': host, 'port': port, 'model_id': resolved_model})
+            except Exception as e:
+                fail_task(conn, task.id, str(e))
+                _fail(str(e))
 
 
 @asr_app.command('transcribe')
@@ -535,6 +599,8 @@ def asr_transcribe_cmd(
     audio: Path = typer.Option(..., '--audio'),
     lang: str = typer.Option('auto', '--lang'),
     model: str = typer.Option('auto', '--model'),
+    wait: bool | None = typer.Option(None, '--wait/--no-wait'),
+    wait_timeout: int | None = typer.Option(None, '--wait-timeout', min=1),
     as_json: bool = typer.Option(False, '--json'),
 ) -> None:
     state: AppState = ctx.obj
@@ -552,7 +618,21 @@ def asr_transcribe_cmd(
             {'audio': str(audio), 'lang': lang},
         ) as task:
             try:
-                result = transcribe_file(state.config, audio, resolved_model, lang)
+                runtime_options = _build_runtime_options(
+                    state,
+                    task_type='asr_transcribe',
+                    task_id=task.id,
+                    wait_for_lock=wait,
+                    wait_timeout=wait_timeout,
+                    command_summary=f'asr transcribe --model {resolved_model}',
+                )
+                result = transcribe_file(
+                    state.config,
+                    audio,
+                    resolved_model,
+                    lang,
+                    runtime_options=runtime_options,
+                )
                 complete_task(conn, task.id, result)
             except Exception as e:
                 fail_task(conn, task.id, str(e))
@@ -588,6 +668,8 @@ def asr_stream_cmd(
     model: str = typer.Option('auto', '--model'),
     format: str = typer.Option('text', '--format', help='text|ndjson'),
     mic_seconds: int = typer.Option(8, '--mic-seconds', min=2, max=120),
+    wait: bool | None = typer.Option(None, '--wait/--no-wait'),
+    wait_timeout: int | None = typer.Option(None, '--wait-timeout', min=1),
 ) -> None:
     state: AppState = ctx.obj
     model_arg = None if model == 'auto' else model
@@ -620,7 +702,23 @@ def asr_stream_cmd(
             {'audio': str(audio_path), 'lang': lang, 'input': input_mode},
         ) as task:
             try:
-                chunks = list(stream_transcribe_file(state.config, audio_path, resolved_model, lang))
+                runtime_options = _build_runtime_options(
+                    state,
+                    task_type='asr_stream',
+                    task_id=task.id,
+                    wait_for_lock=wait,
+                    wait_timeout=wait_timeout,
+                    command_summary=f'asr stream --model {resolved_model}',
+                )
+                chunks = list(
+                    stream_transcribe_file(
+                        state.config,
+                        audio_path,
+                        resolved_model,
+                        lang,
+                        runtime_options=runtime_options,
+                    )
+                )
                 if format == 'ndjson':
                     for row in stream_to_ndjson(chunks, session_id=task.id):
                         console.print(row)
@@ -643,30 +741,42 @@ def tts_clone_cmd(
     profile: str = typer.Option(..., '--profile'),
     text: str = typer.Option(..., '--text'),
     out: Path = typer.Option(..., '--out'),
-    model: str = typer.Option('qwen-tts-1.7b', '--model'),
+    model: str | None = typer.Option(None, '--model'),
     seed: int | None = typer.Option(None, '--seed'),
     instruct: str | None = typer.Option(None, '--instruct'),
+    wait: bool | None = typer.Option(None, '--wait/--no-wait'),
+    wait_timeout: int | None = typer.Option(None, '--wait-timeout', min=1),
     as_json: bool = typer.Option(False, '--json'),
 ) -> None:
     state: AppState = ctx.obj
+    resolved_model = resolve_tts_model_id(state.config, 'clone', model)
 
     with connect(state.db_path) as conn:
         with tracked_task(
             conn,
             'tts_clone',
-            model,
+            resolved_model,
             {'profile': profile, 'text_preview': text[:50], 'out': str(out)},
         ) as task:
             try:
+                runtime_options = _build_runtime_options(
+                    state,
+                    task_type='tts_clone',
+                    task_id=task.id,
+                    wait_for_lock=wait,
+                    wait_timeout=wait_timeout,
+                    command_summary=f'tts clone --model {resolved_model}',
+                )
                 result = clone_to_file(
                     config=state.config,
                     conn=conn,
                     profile_id_or_name=profile,
                     text=text,
                     output_path=out,
-                    model_id=model,
+                    model_id=resolved_model,
                     seed=seed,
                     instruct=instruct,
+                    runtime_options=runtime_options,
                 )
                 complete_task(conn, task.id, result)
             except Exception as e:
@@ -688,17 +798,20 @@ def tts_custom_cmd(
     speaker: str = typer.Option('Vivian', '--speaker'),
     language: str = typer.Option('auto', '--language'),
     instruct: str | None = typer.Option(None, '--instruct'),
-    model: str = typer.Option('qwen-tts-1.7b-customvoice-8bit', '--model'),
+    model: str | None = typer.Option(None, '--model'),
     seed: int | None = typer.Option(None, '--seed'),
+    wait: bool | None = typer.Option(None, '--wait/--no-wait'),
+    wait_timeout: int | None = typer.Option(None, '--wait-timeout', min=1),
     as_json: bool = typer.Option(False, '--json'),
 ) -> None:
     state: AppState = ctx.obj
+    resolved_model = resolve_tts_model_id(state.config, 'custom', model)
 
     with connect(state.db_path) as conn:
         with tracked_task(
             conn,
             'tts_custom',
-            model,
+            resolved_model,
             {
                 'text_preview': text[:50],
                 'out': str(out),
@@ -707,15 +820,24 @@ def tts_custom_cmd(
             },
         ) as task:
             try:
+                runtime_options = _build_runtime_options(
+                    state,
+                    task_type='tts_custom',
+                    task_id=task.id,
+                    wait_for_lock=wait,
+                    wait_timeout=wait_timeout,
+                    command_summary=f'tts custom --model {resolved_model}',
+                )
                 result = custom_to_file(
                     config=state.config,
                     text=text,
                     output_path=out,
-                    model_id=model,
+                    model_id=resolved_model,
                     speaker=speaker,
                     language=language,
                     instruct=instruct,
                     seed=seed,
+                    runtime_options=runtime_options,
                 )
                 complete_task(conn, task.id, result)
             except Exception as e:
@@ -736,17 +858,20 @@ def tts_design_cmd(
     instruct: str = typer.Option(..., '--instruct'),
     out: Path = typer.Option(..., '--out'),
     language: str = typer.Option('auto', '--language'),
-    model: str = typer.Option('qwen-tts-1.7b-voicedesign-8bit', '--model'),
+    model: str | None = typer.Option(None, '--model'),
     seed: int | None = typer.Option(None, '--seed'),
+    wait: bool | None = typer.Option(None, '--wait/--no-wait'),
+    wait_timeout: int | None = typer.Option(None, '--wait-timeout', min=1),
     as_json: bool = typer.Option(False, '--json'),
 ) -> None:
     state: AppState = ctx.obj
+    resolved_model = resolve_tts_model_id(state.config, 'design', model)
 
     with connect(state.db_path) as conn:
         with tracked_task(
             conn,
             'tts_design',
-            model,
+            resolved_model,
             {
                 'text_preview': text[:50],
                 'instruct_preview': instruct[:50],
@@ -755,14 +880,23 @@ def tts_design_cmd(
             },
         ) as task:
             try:
+                runtime_options = _build_runtime_options(
+                    state,
+                    task_type='tts_design',
+                    task_id=task.id,
+                    wait_for_lock=wait,
+                    wait_timeout=wait_timeout,
+                    command_summary=f'tts design --model {resolved_model}',
+                )
                 result = design_to_file(
                     config=state.config,
                     text=text,
                     output_path=out,
-                    model_id=model,
+                    model_id=resolved_model,
                     instruct=instruct,
                     language=language,
                     seed=seed,
+                    runtime_options=runtime_options,
                 )
                 complete_task(conn, task.id, result)
             except Exception as e:
@@ -785,7 +919,9 @@ def pipeline_run_cmd(
     out: Path | None = typer.Option(None, '--out'),
     lang: str = typer.Option('auto', '--lang'),
     asr_model: str = typer.Option('auto', '--asr-model'),
-    tts_model: str = typer.Option('qwen-tts-1.7b', '--tts-model'),
+    tts_model: str | None = typer.Option(None, '--tts-model'),
+    wait: bool | None = typer.Option(None, '--wait/--no-wait'),
+    wait_timeout: int | None = typer.Option(None, '--wait-timeout', min=1),
     as_json: bool = typer.Option(False, '--json'),
 ) -> None:
     state: AppState = ctx.obj
@@ -797,6 +933,7 @@ def pipeline_run_cmd(
         out = get_outputs_dir(state.config) / f'pipeline-{uuid.uuid4().hex[:8]}.wav'
 
     resolved_asr_model = resolve_asr_model_id(state.config, None if asr_model == 'auto' else asr_model)
+    resolved_tts_model = resolve_tts_model_id(state.config, 'clone', tts_model)
 
     with connect(state.db_path) as conn:
         with tracked_task(
@@ -811,16 +948,31 @@ def pipeline_run_cmd(
             },
         ) as task:
             try:
-                asr_result = transcribe_file(state.config, audio, resolved_asr_model, lang)
+                runtime_options = _build_runtime_options(
+                    state,
+                    task_type='pipeline_run',
+                    task_id=task.id,
+                    wait_for_lock=wait,
+                    wait_timeout=wait_timeout,
+                    command_summary=f'pipeline run --asr-model {resolved_asr_model} --tts-model {resolved_tts_model}',
+                )
+                asr_result = transcribe_file(
+                    state.config,
+                    audio,
+                    resolved_asr_model,
+                    lang,
+                    runtime_options=runtime_options,
+                )
                 clone_result = clone_to_file(
                     config=state.config,
                     conn=conn,
                     profile_id_or_name=profile,
                     text=clone_text,
                     output_path=out,
-                    model_id=tts_model,
+                    model_id=resolved_tts_model,
                     seed=None,
                     instruct=None,
+                    runtime_options=runtime_options,
                 )
                 result = {
                     'transcription': asr_result,

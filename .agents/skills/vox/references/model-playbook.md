@@ -25,7 +25,7 @@ scripts/vox_cmd.sh model path --model <model-id>
 ### 准备模型
 
 ```bash
-bash scripts/ensure_model.sh <model-id|asr-auto|tts-default>
+bash scripts/ensure_model.sh <model-id|asr-auto|tts-default|tts-custom-default|tts-design-default>
 ```
 
 ## 规则

@@ -8,11 +8,19 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from .models import ASR_MODEL_CANDIDATES, DEFAULT_TTS_MODEL_ID
+from .models import (
+    ASR_MODEL_CANDIDATES,
+    DEFAULT_TTS_CUSTOM_MODEL_ID,
+    DEFAULT_TTS_DESIGN_MODEL_ID,
+    DEFAULT_TTS_MODEL_ID,
+)
 
 
 class RuntimeConfig(BaseModel):
     home_dir: str = '~/.vox'
+    wait_for_lock: bool = True
+    lock_wait_timeout_sec: int = 1800
+    tts_small_base_max_parallel: int = 2
 
 
 class HFConfig(BaseModel):
@@ -27,6 +35,8 @@ class ASRConfig(BaseModel):
 
 class TTSConfig(BaseModel):
     default_model: str = DEFAULT_TTS_MODEL_ID
+    default_custom_model: str = DEFAULT_TTS_CUSTOM_MODEL_ID
+    default_design_model: str = DEFAULT_TTS_DESIGN_MODEL_ID
 
 
 class VoxConfig(BaseModel):
@@ -62,6 +72,10 @@ def get_outputs_dir(config: VoxConfig) -> Path:
 
 def get_cache_dir(config: VoxConfig) -> Path:
     return get_home_dir(config) / 'cache'
+
+
+def get_locks_dir(config: VoxConfig) -> Path:
+    return get_home_dir(config) / 'locks'
 
 
 def get_hf_cache_dir(config: VoxConfig) -> Path:
@@ -116,6 +130,15 @@ def load_config() -> VoxConfig:
     if (threshold := os.getenv('VOX_ASR_MEMORY_THRESHOLD_GB')):
         merged.asr.memory_threshold_gb = int(threshold)
 
+    if (tts_default := os.getenv('VOX_TTS_DEFAULT_MODEL')):
+        merged.tts.default_model = tts_default
+
+    if (tts_custom_default := os.getenv('VOX_TTS_DEFAULT_CUSTOM_MODEL')):
+        merged.tts.default_custom_model = tts_custom_default
+
+    if (tts_design_default := os.getenv('VOX_TTS_DEFAULT_DESIGN_MODEL')):
+        merged.tts.default_design_model = tts_design_default
+
     return merged
 
 
@@ -124,6 +147,7 @@ def ensure_runtime_dirs(config: VoxConfig) -> None:
     get_profiles_dir(config).mkdir(parents=True, exist_ok=True)
     get_outputs_dir(config).mkdir(parents=True, exist_ok=True)
     get_cache_dir(config).mkdir(parents=True, exist_ok=True)
+    get_locks_dir(config).mkdir(parents=True, exist_ok=True)
 
 
 def get_total_memory_gb() -> float | None:
@@ -151,3 +175,13 @@ def resolve_asr_model_id(config: VoxConfig, model_override: str | None = None) -
     if memory_gb >= config.asr.memory_threshold_gb:
         return 'qwen-asr-1.7b-8bit'
     return 'qwen-asr-1.7b-4bit'
+
+
+def resolve_tts_model_id(config: VoxConfig, mode: Literal['clone', 'custom', 'design'], model_override: str | None = None) -> str:
+    if model_override:
+        return model_override
+    if mode == 'custom':
+        return config.tts.default_custom_model
+    if mode == 'design':
+        return config.tts.default_design_model
+    return config.tts.default_model

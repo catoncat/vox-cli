@@ -10,7 +10,7 @@ class CacheStatus:
     verified: bool
     cache_dir: Path
     revision: str | None
-    has_incomplete: bool
+    has_incomplete: bool | None
     has_weights: bool
     error: str | None = None
 

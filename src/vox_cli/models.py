@@ -70,5 +70,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     ),
 }
 
-DEFAULT_TTS_MODEL_ID = 'qwen-tts-1.7b'
+DEFAULT_TTS_MODEL_ID = 'qwen-tts-0.6b-base-8bit'
+DEFAULT_TTS_CUSTOM_MODEL_ID = 'qwen-tts-0.6b-customvoice-8bit'
+DEFAULT_TTS_DESIGN_MODEL_ID = 'qwen-tts-0.6b-voicedesign-8bit'
 ASR_MODEL_CANDIDATES = ('qwen-asr-1.7b-8bit', 'qwen-asr-1.7b-4bit')

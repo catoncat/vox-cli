@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import os
+import tempfile
 
 import numpy as np
 import soundfile as sf
@@ -13,6 +15,19 @@ class AudioMetrics:
     sample_rate: int
     duration_sec: float
     rms: float
+
+
+def _atomic_write_audio(dst: Path, samples: np.ndarray, sample_rate: int) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f'.{dst.stem}-', suffix=dst.suffix, dir=str(dst.parent))
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        sf.write(str(tmp_path), samples, sample_rate)
+        os.replace(tmp_path, dst)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def analyze_audio(path: Path) -> AudioMetrics:
@@ -28,8 +43,7 @@ def copy_as_wav(src: Path, dst: Path) -> AudioMetrics:
     samples, sample_rate = sf.read(str(src), dtype='float32', always_2d=False)
     if samples.ndim > 1:
         samples = np.mean(samples, axis=1)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(dst), samples, sample_rate)
+    _atomic_write_audio(dst, samples, sample_rate)
     duration_sec = len(samples) / float(sample_rate)
     rms = float(np.sqrt(np.mean(np.square(samples)))) if len(samples) else 0.0
     return AudioMetrics(sample_rate=sample_rate, duration_sec=duration_sec, rms=rms)
@@ -58,8 +72,7 @@ def combine_samples(sample_paths: list[Path], output_path: Path) -> None:
         if silence is not None:
             all_audio.append(silence)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(output_path), np.concatenate(all_audio), base_sr or 24000)
+    _atomic_write_audio(output_path, np.concatenate(all_audio), base_sr or 24000)
 
 
 def stable_hash(parts: list[str]) -> str:

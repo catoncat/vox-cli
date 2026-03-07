@@ -18,7 +18,7 @@ scripts/vox_cmd.sh profile list --json
 
 ```bash
 bash scripts/ensure_model.sh asr-auto
-bash scripts/ensure_model.sh tts-default
+bash scripts/ensure_model.sh tts-default  # 跟随配置中的 tts.default_model
 ```
 
 3. 执行一次 `pipeline run`。

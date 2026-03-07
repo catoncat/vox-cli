@@ -14,9 +14,11 @@ Usage:
   bash scripts/ensure_model.sh <model>
 
 Supported model aliases:
-  asr-auto     Resolve to doctor.checks.resolved_asr_model.value
-  tts-default  Resolve to config.tts.default_model
-  <model-id>   Explicit model id, e.g. qwen-asr-1.7b-8bit
+  asr-auto            Resolve to doctor.checks.resolved_asr_model.value
+  tts-default         Resolve to config.tts.default_model
+  tts-custom-default  Resolve to config.tts.default_custom_model
+  tts-design-default  Resolve to config.tts.default_design_model
+  <model-id>          Explicit model id, e.g. qwen-asr-1.7b-8bit
 EOF
   exit 2
 }
@@ -45,15 +47,21 @@ if not resolved:
 print(resolved)
 PY
       ;;
-    tts-default)
+    tts-default|tts-custom-default|tts-design-default)
       "$VOX_CMD" config show --json >"$tmp"
-      python3 - "$tmp" <<'PY'
+      python3 - "$tmp" "$raw" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-resolved = payload.get("tts", {}).get("default_model", "")
+alias_name = sys.argv[2]
+field_name = {
+    "tts-default": "default_model",
+    "tts-custom-default": "default_custom_model",
+    "tts-design-default": "default_design_model",
+}[alias_name]
+resolved = payload.get("tts", {}).get(field_name, "")
 if not resolved:
     raise SystemExit(1)
 print(resolved)
@@ -66,6 +74,10 @@ PY
 }
 
 if [[ $# -ne 1 ]]; then
+  usage
+fi
+
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
   usage
 fi
 

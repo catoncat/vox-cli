@@ -17,14 +17,14 @@ scripts/vox_cmd.sh profile list --json
 2. 先根据模式保证模型可用：
 
 ```bash
-# clone：默认模型（通常是 qwen-tts-1.7b）
+# clone：按配置中的 `tts.default_model`
 bash scripts/ensure_model.sh tts-default
 
-# custom：建议用 CustomVoice 模型
-bash scripts/ensure_model.sh qwen-tts-1.7b-customvoice-8bit
+# custom：按配置中的 `tts.default_custom_model`
+bash scripts/ensure_model.sh tts-custom-default
 
-# design：建议用 VoiceDesign 模型
-bash scripts/ensure_model.sh qwen-tts-1.7b-voicedesign-8bit
+# design：按配置中的 `tts.default_design_model`
+bash scripts/ensure_model.sh tts-design-default
 ```
 
 3. `clone` 模式需要 profile；若 profile 不存在，先创建并添加至少 1 个样本。
@@ -51,7 +51,6 @@ scripts/vox_cmd.sh tts clone \
   --profile <name-or-id> \
   --text "<target text>" \
   --out <output.wav> \
-  --model qwen-tts-1.7b \
   --json
 ```
 
@@ -59,6 +58,7 @@ scripts/vox_cmd.sh tts clone \
 
 1. `--seed <int>`：固定随机性。
 2. `--instruct "<style>"`：底层模型支持时生效。
+3. `--model <model-id>`：仅在需要覆盖配置默认时传入。
 
 ## 预置说话人（custom）
 
@@ -69,13 +69,13 @@ scripts/vox_cmd.sh tts custom \
   --language auto \
   --instruct "开心，语速稍快" \
   --out <output.wav> \
-  --model qwen-tts-1.7b-customvoice-8bit \
   --json
 ```
 
 可选参数：
 
 1. `--seed <int>`：模型支持时生效。
+2. `--model <model-id>`：仅在需要覆盖配置默认时传入。
 
 ## 声音设计（design）
 
@@ -85,13 +85,13 @@ scripts/vox_cmd.sh tts design \
   --instruct "低沉男声，播音腔，语气稳重" \
   --language auto \
   --out <output.wav> \
-  --model qwen-tts-1.7b-voicedesign-8bit \
   --json
 ```
 
 可选参数：
 
 1. `--seed <int>`：模型支持时生效。
+2. `--model <model-id>`：仅在需要覆盖配置默认时传入。
 
 ## 交付要求
 

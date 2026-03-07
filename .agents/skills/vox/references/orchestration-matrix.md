@@ -48,7 +48,7 @@
 ### TTS
 
 - 触发：`clone` / `custom` / `design`
-- 最小 happy path：`clone` 且 profile 不明确时先 `profile list --json`；然后 `ensure_model` → `tts ...` → `health_gate`
+- 最小 happy path：`clone` 且 profile 不明确时先 `profile list --json`；然后按模式选择 `ensure_model` alias（`tts-default` / `tts-custom-default` / `tts-design-default`）→ `tts ...` → `health_gate`
 - 升级路径：仅在环境错误时回退 `bootstrap`
 - 交付门禁：`health_gate --require-file <output.wav>`
 - 禁止：为确认流程重复跑重推理、反复 benchmark，或把 `clone` 专属逻辑套到全部 TTS 场景

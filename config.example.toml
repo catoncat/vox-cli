@@ -1,5 +1,8 @@
 [runtime]
 home_dir = "~/.vox"
+wait_for_lock = true
+lock_wait_timeout_sec = 1800
+tts_small_base_max_parallel = 2
 
 [hf]
 # 下载端点优先顺序：镜像在前，官方在后
@@ -13,4 +16,6 @@ default_model = "auto"
 memory_threshold_gb = 32
 
 [tts]
-default_model = "qwen-tts-1.7b"
+default_model = "qwen-tts-0.6b-base-8bit"
+default_custom_model = "qwen-tts-0.6b-customvoice-8bit"
+default_design_model = "qwen-tts-0.6b-voicedesign-8bit"

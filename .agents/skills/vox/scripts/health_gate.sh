@@ -17,7 +17,7 @@ Usage:
   bash scripts/health_gate.sh [options]
 
 Options:
-  --require-model <id|asr-auto|tts-default>   Scope cache by model list (no verify/pull)
+  --require-model <id|asr-auto|tts-default|tts-custom-default|tts-design-default>   Scope cache by model list (no verify/pull)
   --require-file <path>                       Required output/input file (repeatable)
   --ttl-hours <int>                           Cache TTL hours (default: 24)
   --force                                     Ignore cached state and run full self-check
