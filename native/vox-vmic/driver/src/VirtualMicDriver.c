@@ -5,6 +5,10 @@
 #include <CoreAudio/AudioHardware.h>
 #include <CoreAudio/AudioHardwareBase.h>
 #include <CoreFoundation/CFString.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <mach/mach_time.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -68,11 +72,101 @@ static AudioServerPlugInHostRef gHost = NULL;
 static UInt32 gActiveIOCount = 0;
 static UInt64 gClockSeed = 1;
 static UInt64 gStartHostTime = 0;
-static VMicReader *gReader = NULL;
+static int gUDPSocket = -1;
+static float *gRingBuffer = NULL;
+static UInt32 gRingCapacityFrames = 48000 * 30;
+static UInt32 gRingReadFrame = 0;
+static UInt32 gRingWriteFrame = 0;
+static UInt32 gRingQueuedFrames = 0;
+static const UInt16 kUDPPort = 47211;
 
 static bool UUIDEqual(REFIID left, CFUUIDRef right) {
     CFUUIDBytes bytes = CFUUIDGetUUIDBytes(right);
     return memcmp(&left, &bytes, sizeof(CFUUIDBytes)) == 0;
+}
+
+static void ResetRing(void) {
+    gRingReadFrame = 0;
+    gRingWriteFrame = 0;
+    gRingQueuedFrames = 0;
+}
+
+static OSStatus EnsureSocketReady(void) {
+    if (gUDPSocket >= 0) {
+        return 0;
+    }
+    gUDPSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (gUDPSocket < 0) {
+        return kAudioHardwareUnspecifiedError;
+    }
+    int flags = fcntl(gUDPSocket, F_GETFL, 0);
+    if (flags >= 0) {
+        (void)fcntl(gUDPSocket, F_SETFL, flags | O_NONBLOCK);
+    }
+    int reuse = 1;
+    (void)setsockopt(gUDPSocket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(kUDPPort);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(gUDPSocket, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(gUDPSocket);
+        gUDPSocket = -1;
+        return kAudioHardwareUnspecifiedError;
+    }
+    if (gRingBuffer == NULL) {
+        gRingBuffer = (float *)calloc(gRingCapacityFrames, sizeof(float));
+        if (gRingBuffer == NULL) {
+            close(gUDPSocket);
+            gUDPSocket = -1;
+            return kAudioHardwareUnspecifiedError;
+        }
+    }
+    ResetRing();
+    return 0;
+}
+
+static void CloseSocket(void) {
+    if (gUDPSocket >= 0) {
+        close(gUDPSocket);
+        gUDPSocket = -1;
+    }
+}
+
+static void PumpUDP(void) {
+    if (gUDPSocket < 0 || gRingBuffer == NULL) {
+        return;
+    }
+    float packet[2048];
+    while (1) {
+        ssize_t nread = recv(gUDPSocket, packet, sizeof(packet), 0);
+        if (nread <= 0) {
+            break;
+        }
+        UInt32 frames = (UInt32)(nread / sizeof(float));
+        for (UInt32 i = 0; i < frames; ++i) {
+            if (gRingQueuedFrames >= gRingCapacityFrames) {
+                gRingReadFrame = (gRingReadFrame + 1) % gRingCapacityFrames;
+                gRingQueuedFrames -= 1;
+            }
+            gRingBuffer[gRingWriteFrame] = packet[i];
+            gRingWriteFrame = (gRingWriteFrame + 1) % gRingCapacityFrames;
+            gRingQueuedFrames += 1;
+        }
+    }
+}
+
+static void ReadFrames(Float32 *output, UInt32 requestedFrames) {
+    UInt32 produced = 0;
+    while (produced < requestedFrames && gRingQueuedFrames > 0) {
+        output[produced++] = gRingBuffer[gRingReadFrame];
+        gRingReadFrame = (gRingReadFrame + 1) % gRingCapacityFrames;
+        gRingQueuedFrames -= 1;
+    }
+    while (produced < requestedFrames) {
+        output[produced++] = 0.0f;
+    }
 }
 
 static AudioStreamBasicDescription VirtualMicFormat(void) {
@@ -660,18 +754,18 @@ static OSStatus STDMETHODCALLTYPE SetPropertyData(AudioServerPlugInDriverRef inD
 }
 
 static OSStatus STDMETHODCALLTYPE StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID) {
+    (void)inDriver;
     (void)inClientID;
     if (inDeviceObjectID != kObjectID_Device) {
         return kAudioHardwareBadObjectError;
     }
 
-        if (gActiveIOCount == 0) {
+    if (gActiveIOCount == 0) {
         gStartHostTime = mach_absolute_time();
         gClockSeed += 1;
-        if (gReader == NULL) {
-            int err = 0;
-            gReader = vmic_reader_open(NULL, &err);
-            (void)err;
+        OSStatus status = EnsureSocketReady();
+        if (status != 0) {
+            return status;
         }
     }
     gActiveIOCount += 1;
@@ -679,17 +773,18 @@ static OSStatus STDMETHODCALLTYPE StartIO(AudioServerPlugInDriverRef inDriver, A
 }
 
 static OSStatus STDMETHODCALLTYPE StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID) {
+    (void)inDriver;
     (void)inClientID;
     if (inDeviceObjectID != kObjectID_Device) {
         return kAudioHardwareBadObjectError;
     }
 
-        if (gActiveIOCount > 0) {
+    if (gActiveIOCount > 0) {
         gActiveIOCount -= 1;
     }
-    if (gActiveIOCount == 0 && gReader != NULL) {
-        vmic_reader_close(gReader);
-        gReader = NULL;
+    if (gActiveIOCount == 0) {
+        CloseSocket();
+        ResetRing();
     }
     return 0;
 }
@@ -737,6 +832,7 @@ static OSStatus STDMETHODCALLTYPE BeginIOOperation(AudioServerPlugInDriverRef in
 }
 
 static OSStatus STDMETHODCALLTYPE DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo, void *ioMainBuffer, void *ioSecondaryBuffer) {
+    (void)inDriver;
     (void)inClientID;
     (void)inIOCycleInfo;
     (void)ioSecondaryBuffer;
@@ -748,18 +844,9 @@ static OSStatus STDMETHODCALLTYPE DoIOOperation(AudioServerPlugInDriverRef inDri
         return 0;
     }
 
+    PumpUDP();
     Float32 *buffer = (Float32 *)ioMainBuffer;
-    memset(buffer, 0, sizeof(Float32) * inIOBufferFrameSize);
-
-        if (gReader == NULL) {
-        int err = 0;
-        gReader = vmic_reader_open(NULL, &err);
-        (void)err;
-    }
-
-    if (gReader != NULL) {
-        vmic_reader_dequeue(gReader, buffer, inIOBufferFrameSize);
-    }
+    ReadFrames(buffer, inIOBufferFrameSize);
     return 0;
 }
 

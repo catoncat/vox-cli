@@ -1,4 +1,4 @@
-.PHONY: build-helper build-driver install-driver uninstall-driver probe-driver check clean
+.PHONY: build-helper build-driver install-driver uninstall-driver probe-driver stream-file e2e-test check clean
 
 build-helper:
 	swift build
@@ -14,6 +14,12 @@ uninstall-driver:
 
 probe-driver:
 	bash scripts/probe-driver.sh
+
+stream-file:
+	bash scripts/stream-file.sh $(FILE)
+
+e2e-test:
+	bash scripts/e2e-test.sh
 
 check: build-helper build-driver
 	bash scripts/smoke-test.sh

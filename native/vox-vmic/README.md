@@ -23,24 +23,33 @@ cd native/vox-vmic
 make install-driver
 .build/debug/vox-vmicctl prime-sine --seconds 2 --frequency 660
 make probe-driver
+make e2e-test
 ```
 
 如果 `system_profiler` 或 `ffmpeg` 里能看到 `Vox Virtual Mic`，说明驱动已加载成功。
 
 ## 实际使用
 
-### 1) 往虚拟麦克风写测试音
+### 1) 安装并确认设备
 
 ```bash
-cd /Users/envvar/work/repos/vox-cli
-uv run python -m vox_cli.main vmic prime-sine --seconds 2 --frequency 660
+cd /Users/envvar/work/repos/vox-cli/native/vox-vmic
+make install-driver
+make probe-driver
 ```
 
-### 2) 往虚拟麦克风写本地音频文件
+### 2) 实时推送一个音频文件到虚拟麦克风
 
 ```bash
-cd /Users/envvar/work/repos/vox-cli
-uv run python -m vox_cli.main vmic enqueue --audio /path/to/input.wav
+cd /Users/envvar/work/repos/vox-cli/native/vox-vmic
+bash scripts/stream-file.sh /Users/envvar/.vox/outputs/pipeline-75c727e4.wav
+```
+
+或：
+
+```bash
+cd /Users/envvar/work/repos/vox-cli/native/vox-vmic
+make stream-file FILE=/Users/envvar/.vox/outputs/pipeline-75c727e4.wav
 ```
 
 ### 3) 在目标 App 里选输入设备
@@ -49,9 +58,11 @@ uv run python -m vox_cli.main vmic enqueue --audio /path/to/input.wav
 
 可用于：
 
-- 微信 Mac
 - QuickTime Player
-- ffmpeg / OBS / 会议软件
+- ffmpeg
+- OBS
+- 会议软件
+- 任何允许手动选择输入设备的 App
 
 ## 常用命令
 
@@ -62,6 +73,7 @@ make build-driver
 make install-driver
 make uninstall-driver
 make probe-driver
+make e2e-test
 ```
 
 ```bash
@@ -70,6 +82,7 @@ uv run python -m vox_cli.main vmic status
 uv run python -m vox_cli.main vmic prime-sine --seconds 2 --frequency 660
 uv run python -m vox_cli.main vmic enqueue --audio /path/to/file.wav
 uv run python -m vox_cli.main vmic build-driver
+# 注意：当前稳定链路优先使用 native/vox-vmic/scripts/stream-file.sh
 ```
 
 ## 当前边界
@@ -82,3 +95,24 @@ uv run python -m vox_cli.main vmic build-driver
 - 更完整的 HAL 属性与控制项
 
 但作为 MVP，已经可以把它当成一个可安装、可枚举、可喂音频的虚拟麦克风来用了。
+
+
+## E2E 测试
+
+```bash
+cd /Users/envvar/work/repos/vox-cli/native/vox-vmic
+make e2e-test
+# 或指定输入文件
+bash scripts/e2e-test.sh /Users/envvar/.vox/outputs/pipeline-75c727e4.wav
+```
+
+默认样本会使用 `/Users/envvar/.vox/outputs/pipeline-75c727e4.wav`。
+产物会写到 `native/vox-vmic/artifacts/`，并输出时长、RMS、peak、非静音校验结果。
+
+
+## 实时推流文件
+
+```bash
+cd /Users/envvar/work/repos/vox-cli/native/vox-vmic
+bash scripts/stream-file.sh /Users/envvar/.vox/outputs/pipeline-75c727e4.wav
+```

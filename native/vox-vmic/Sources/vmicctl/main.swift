@@ -197,7 +197,13 @@ struct VMicCLI {
         }
 
         let url = URL(fileURLWithPath: input)
-        let samples = try decodeToMonoFloat32(url: url)
+        let samples: [Float]
+        do {
+            samples = try decodeToMonoFloat32(url: url)
+        } catch {
+            FileHandle.standardError.write(Data("[vox-vmicctl] AVFoundation decode failed, fallback to ffmpeg\n".utf8))
+            samples = try decodeWithFFmpeg(url: url)
+        }
         try writeSamples(samples)
         try printAction(name: "enqueue", note: "input=\(url.path) frames=\(samples.count)")
     }
@@ -258,6 +264,46 @@ struct VMicCLI {
         }
         guard enqueueStatus == 0 else {
             throw CLIError.message("写入缓冲失败：\(String(cString: strerror(Int32(enqueueStatus))))")
+        }
+    }
+
+    static func decodeWithFFmpeg(url: URL) throws -> [Float] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg")
+        if !FileManager.default.isExecutableFile(atPath: process.executableURL!.path) {
+            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/ffmpeg")
+        }
+        process.arguments = [
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", url.path,
+            "-f", "f32le",
+            "-ac", "1",
+            "-ar", String(Int(targetSampleRate)),
+            "pipe:1",
+        ]
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        try process.run()
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        if process.terminationStatus != 0 {
+            let errorText = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw CLIError.message("ffmpeg 解码失败：\(errorText)")
+        }
+
+        if data.isEmpty || data.count % MemoryLayout<Float>.size != 0 {
+            throw CLIError.message("ffmpeg 输出为空或格式异常")
+        }
+
+        let count = data.count / MemoryLayout<Float>.size
+        return data.withUnsafeBytes { raw in
+            let buffer = raw.bindMemory(to: Float.self)
+            return Array(buffer.prefix(count))
         }
     }
 

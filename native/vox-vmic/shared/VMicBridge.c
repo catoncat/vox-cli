@@ -61,7 +61,7 @@ static int ensure_dir(const char *path) {
     if (stat(path, &st) == 0) {
         return S_ISDIR(st.st_mode) ? 0 : ENOTDIR;
     }
-    if (mkdir(path, 0700) == 0 || errno == EEXIST) {
+    if (mkdir(path, 01777) == 0 || errno == EEXIST) {
         return 0;
     }
     return errno;
@@ -72,35 +72,13 @@ int vmic_default_shared_path(char *buffer, size_t size) {
         return EINVAL;
     }
 
-    size_t baseSize = confstr(_CS_DARWIN_USER_TEMP_DIR, NULL, 0);
-    if (baseSize == 0) {
-        return errno ? errno : ENOENT;
-    }
-
-    char *base = calloc(baseSize + 1, 1);
-    if (base == NULL) {
-        return ENOMEM;
-    }
-
-    if (confstr(_CS_DARWIN_USER_TEMP_DIR, base, baseSize) == 0) {
-        int err = errno ? errno : ENOENT;
-        free(base);
-        return err;
-    }
-
-    char dirPath[PATH_MAX];
-    int written = snprintf(dirPath, sizeof(dirPath), "%s%s", base, "com.envvar.vox.vmic");
-    free(base);
-    if (written < 0 || (size_t)written >= sizeof(dirPath)) {
-        return ENAMETOOLONG;
-    }
-
+    const char *dirPath = "/tmp/com.envvar.vox.vmic";
     int dirErr = ensure_dir(dirPath);
     if (dirErr != 0) {
         return dirErr;
     }
 
-    written = snprintf(buffer, size, "%s/%s", dirPath, "stream.bin");
+    int written = snprintf(buffer, size, "%s/%s", dirPath, "stream.bin");
     if (written < 0 || (size_t)written >= size) {
         return ENAMETOOLONG;
     }
@@ -121,15 +99,18 @@ static int map_file(const char *path, size_t size, int createIfMissing, int *fdO
         flags |= O_CREAT;
     }
 
-    int fd = open(path, flags, 0600);
+    int fd = open(path, flags, 0666);
     if (fd < 0) {
         return errno;
     }
 
-    if (createIfMissing && ftruncate(fd, (off_t)size) != 0) {
-        int err = errno;
-        close(fd);
-        return err;
+    if (createIfMissing) {
+        (void)fchmod(fd, 0666);
+        if (ftruncate(fd, (off_t)size) != 0) {
+            int err = errno;
+            close(fd);
+            return err;
+        }
     }
 
     struct stat st;
