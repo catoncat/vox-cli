@@ -72,6 +72,10 @@ static AudioServerPlugInHostRef gHost = NULL;
 static UInt32 gActiveIOCount = 0;
 static UInt64 gClockSeed = 1;
 static UInt64 gStartHostTime = 0;
+static UInt64 gAnchorHostTime = 0;
+static Float64 gHostTicksPerFrame = 0;
+static UInt64 gPeriodCounter = 0;
+static const UInt32 kZeroTimeStampPeriodFrames = 192;
 static int gUDPSocket = -1;
 static float *gRingBuffer = NULL;
 static UInt32 gRingCapacityFrames = 48000 * 30;
@@ -166,6 +170,16 @@ static void ReadFrames(Float32 *output, UInt32 requestedFrames) {
     }
     while (produced < requestedFrames) {
         output[produced++] = 0.0f;
+    }
+}
+
+static void UpdateClockCalibration(void) {
+    struct mach_timebase_info timeBase;
+    mach_timebase_info(&timeBase);
+    long double hostClockFrequency = ((long double)timeBase.denom / (long double)timeBase.numer) * 1000000000.0L;
+    gHostTicksPerFrame = (Float64)(hostClockFrequency / VMIC_DEFAULT_SAMPLE_RATE);
+    if (gHostTicksPerFrame <= 0) {
+        gHostTicksPerFrame = 1.0;
     }
 }
 
@@ -613,7 +627,7 @@ static OSStatus STDMETHODCALLTYPE GetPropertyData(AudioServerPlugInDriverRef inD
                     *outDataSize = sizeof(UInt32);
                     return 0;
                 case kAudioDevicePropertyZeroTimeStampPeriod:
-                    *((UInt32 *)outData) = 512;
+                    *((UInt32 *)outData) = kZeroTimeStampPeriodFrames;
                     *outDataSize = sizeof(UInt32);
                     return 0;
                 case kAudioDevicePropertyDeviceCanBeDefaultDevice:
@@ -762,6 +776,9 @@ static OSStatus STDMETHODCALLTYPE StartIO(AudioServerPlugInDriverRef inDriver, A
 
     if (gActiveIOCount == 0) {
         gStartHostTime = mach_absolute_time();
+        gAnchorHostTime = gStartHostTime;
+        gPeriodCounter = 0;
+        UpdateClockCalibration();
         gClockSeed += 1;
         OSStatus status = EnsureSocketReady();
         if (status != 0) {
@@ -790,22 +807,25 @@ static OSStatus STDMETHODCALLTYPE StopIO(AudioServerPlugInDriverRef inDriver, Au
 }
 
 static OSStatus STDMETHODCALLTYPE GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, Float64 *outSampleTime, UInt64 *outHostTime, UInt64 *outSeed) {
+    (void)inDriver;
     (void)inClientID;
     if (inDeviceObjectID != kObjectID_Device || outSampleTime == NULL || outHostTime == NULL || outSeed == NULL) {
         return kAudioHardwareIllegalOperationError;
     }
 
-        uint64_t now = mach_absolute_time();
-    mach_timebase_info_data_t timebase;
-    mach_timebase_info(&timebase);
-
-    long double elapsedNano = 0.0;
-    if (now >= gStartHostTime) {
-        elapsedNano = ((long double)(now - gStartHostTime) * (long double)timebase.numer) / (long double)timebase.denom;
+    if (gHostTicksPerFrame <= 0) {
+        UpdateClockCalibration();
     }
 
-    *outSampleTime = (Float64)(elapsedNano / 1000000000.0L * VMIC_DEFAULT_SAMPLE_RATE);
-    *outHostTime = now;
+    const UInt64 currentHostTime = mach_absolute_time();
+    const Float64 hostTicksPerPeriod = gHostTicksPerFrame * (Float64)kZeroTimeStampPeriodFrames;
+    const UInt64 nextPeriodHostTime = gAnchorHostTime + (UInt64)((Float64)(gPeriodCounter + 1) * hostTicksPerPeriod);
+    if (currentHostTime >= nextPeriodHostTime) {
+        gPeriodCounter += 1;
+    }
+
+    *outSampleTime = (Float64)gPeriodCounter * (Float64)kZeroTimeStampPeriodFrames;
+    *outHostTime = gAnchorHostTime + (UInt64)((Float64)gPeriodCounter * hostTicksPerPeriod);
     *outSeed = gClockSeed;
     return 0;
 }
