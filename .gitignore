@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 outputs/
 .DS_Store
+.cowork-temp/
+/*.wav
+
+/dist/
+/native/vox-dictation/target/

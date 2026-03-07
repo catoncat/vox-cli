@@ -43,6 +43,9 @@ from .db import (
 )
 from .models import MODEL_REGISTRY
 from .services.asr_service import stream_to_ndjson, stream_transcribe_file, transcribe_file
+from .services.dictation_service import launch_dictation
+from .services.realtime_asr_service import run_realtime_session_server
+from .services.self_service import update_global_install
 from .services.model_service import ensure_model_downloaded, list_model_statuses, resolve_model
 from .services.tts_service import clone_to_file, custom_to_file, design_to_file
 
@@ -73,6 +76,7 @@ tts_app = typer.Typer(help='TTS operations')
 pipeline_app = typer.Typer(help='End-to-end pipelines')
 task_app = typer.Typer(help='Task inspection')
 config_app = typer.Typer(help='Config operations')
+self_app = typer.Typer(help='Self-management operations')
 
 app.add_typer(model_app, name='model')
 app.add_typer(profile_app, name='profile')
@@ -81,6 +85,7 @@ app.add_typer(tts_app, name='tts')
 app.add_typer(pipeline_app, name='pipeline')
 app.add_typer(task_app, name='task')
 app.add_typer(config_app, name='config')
+app.add_typer(self_app, name='self')
 
 
 @app.callback()
@@ -158,6 +163,49 @@ def doctor_cmd(ctx: typer.Context, as_json: bool = typer.Option(False, '--json')
 
     if not ok:
         raise typer.Exit(code=1)
+
+
+@app.command('dictation')
+def dictation_cmd(
+    ctx: typer.Context,
+    lang: str = typer.Option('zh', '--lang'),
+    model: str = typer.Option('auto', '--model'),
+    host: str = typer.Option('127.0.0.1', '--host'),
+    port: int | None = typer.Option(None, '--port'),
+    rebuild_native: bool = typer.Option(False, '--rebuild-native'),
+    partial_interval_ms: int = typer.Option(0, '--partial-interval-ms', min=0),
+) -> None:
+    state: AppState = ctx.obj
+    if platform.system() != 'Darwin' or platform.machine() != 'arm64':
+        _fail('vox dictation currently supports macOS Apple Silicon only')
+
+    try:
+        exit_code = launch_dictation(
+            config=state.config,
+            lang=lang,
+            model=model,
+            host=host,
+            port=port,
+            rebuild_native=rebuild_native,
+            partial_interval_ms=partial_interval_ms,
+        )
+    except Exception as e:
+        _fail(str(e))
+
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+
+
+@self_app.command('update')
+def self_update_cmd(
+    repo: Path = typer.Option(Path.cwd(), '--repo', help='Local vox-cli repository path'),
+    dry_run: bool = typer.Option(False, '--dry-run', help='Print commands without executing'),
+) -> None:
+    try:
+        result = update_global_install(repo, dry_run=dry_run)
+    except Exception as e:
+        _fail(str(e))
+    console.print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 @config_app.command('show')
@@ -361,6 +409,28 @@ def profile_add_sample_cmd(
         _print_json(payload)
     else:
         console.print(payload)
+
+
+@asr_app.command('session-server')
+def asr_session_server_cmd(
+    ctx: typer.Context,
+    host: str = typer.Option('127.0.0.1', '--host'),
+    port: int = typer.Option(8765, '--port'),
+    lang: str = typer.Option('auto', '--lang'),
+    model: str = typer.Option('auto', '--model'),
+    sample_rate: int = typer.Option(16000, '--sample-rate'),
+) -> None:
+    state: AppState = ctx.obj
+    model_arg = None if model == 'auto' else model
+    resolved_model = resolve_asr_model_id(state.config, model_arg)
+    run_realtime_session_server(
+        config=state.config,
+        model_id=resolved_model,
+        language=lang,
+        host=host,
+        port=port,
+        sample_rate=sample_rate,
+    )
 
 
 @asr_app.command('transcribe')

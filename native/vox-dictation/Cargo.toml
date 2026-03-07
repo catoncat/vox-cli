@@ -1,0 +1,48 @@
+[package]
+name = "vox-dictation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+block2 = "0.6.2"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = [
+  "NSApplication",
+  "NSImage",
+  "NSMenu",
+  "NSMenuItem",
+  "NSStatusBar",
+  "NSStatusItem",
+  "NSStatusBarButton",
+  "block2",
+] }
+objc2-avf-audio = { version = "0.3.2", features = [
+  "AVAudioEngine",
+  "AVAudioNode",
+  "AVAudioIONode",
+  "AVAudioFormat",
+  "AVAudioBuffer",
+  "AVAudioTime",
+  "AVAudioTypes",
+  "block2",
+] }
+objc2-core-foundation = { version = "0.3.2", features = ["CFRunLoop"] }
+objc2-core-graphics = { version = "0.3.2", features = [
+  "CGEvent",
+  "CGEventSource",
+  "CGEventTypes",
+  "CGRemoteOperation",
+] }
+objc2-foundation = { version = "0.3.2", features = [
+  "NSDate",
+  "NSRunLoop",
+  "NSString",
+  "NSTimer",
+  "NSObject",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
