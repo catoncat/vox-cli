@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 DST="/Library/Audio/Plug-Ins/HAL/VoxVirtualMic.driver"
-echo "About to remove $DST"
+
+echo "Removing $DST"
 sudo rm -rf "$DST"
+sudo killall coreaudiod || true
+
 echo "removed: $DST"
-echo "next: sudo launchctl kickstart -k system/com.apple.audio.coreaudiod"
+echo "reloaded: coreaudiod"

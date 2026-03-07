@@ -10,16 +10,6 @@
 #include <stdio.h>
 #include <string.h>
 
-typedef struct VirtualMicDriver {
-    AudioServerPlugInDriverInterface *interface;
-    UInt32 refCount;
-    AudioServerPlugInHostRef host;
-    UInt32 activeIOCount;
-    UInt64 clockSeed;
-    UInt64 startHostTime;
-    VMicReader *reader;
-} VirtualMicDriver;
-
 static HRESULT STDMETHODCALLTYPE QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outInterface);
 static ULONG STDMETHODCALLTYPE AddRef(void *inDriver);
 static ULONG STDMETHODCALLTYPE Release(void *inDriver);
@@ -69,23 +59,20 @@ static AudioServerPlugInDriverInterface gDriverInterface = {
     EndIOOperation,
 };
 
-static VirtualMicDriver gDriver = {
-    .interface = &gDriverInterface,
-    .refCount = 1,
-    .host = NULL,
-    .activeIOCount = 0,
-    .clockSeed = 1,
-    .startHostTime = 0,
-    .reader = NULL,
-};
+static AudioServerPlugInDriverInterface *gDriverInterfacePtr = &gDriverInterface;
+static CFUUIDRef gFactoryUUID = NULL;
+static AudioServerPlugInDriverRef gDriverRef = &gDriverInterfacePtr;
+static const CFUUIDBytes kFactoryUUID = {0xC1, 0x8C, 0xE7, 0xC2, 0x98, 0x9E, 0x4E, 0x60, 0x92, 0x20, 0x59, 0xE9, 0x66, 0xA9, 0x26, 0x9A};
+static UInt32 gRefCount = 1;
+static AudioServerPlugInHostRef gHost = NULL;
+static UInt32 gActiveIOCount = 0;
+static UInt64 gClockSeed = 1;
+static UInt64 gStartHostTime = 0;
+static VMicReader *gReader = NULL;
 
 static bool UUIDEqual(REFIID left, CFUUIDRef right) {
     CFUUIDBytes bytes = CFUUIDGetUUIDBytes(right);
     return memcmp(&left, &bytes, sizeof(CFUUIDBytes)) == 0;
-}
-
-static VirtualMicDriver *Driver(AudioServerPlugInDriverRef inDriver) {
-    return (VirtualMicDriver *)inDriver;
 }
 
 static AudioStreamBasicDescription VirtualMicFormat(void) {
@@ -145,12 +132,20 @@ static CFStringRef StreamName(void) {
     return CFSTR("Vox Virtual Mic Input");
 }
 
+static CFStringRef ResourceBundlePath(void) {
+    return CFSTR("/Library/Audio/Plug-Ins/HAL/VoxVirtualMic.driver");
+}
+
 void *VoxVMicDriverFactory(CFAllocatorRef allocator, CFUUIDRef typeUUID) {
     (void)allocator;
     if (!CFEqual(typeUUID, kAudioServerPlugInTypeUUID)) {
         return NULL;
     }
-    return &gDriver;
+    if (gFactoryUUID == NULL) {
+        gFactoryUUID = CFUUIDCreateFromUUIDBytes(kCFAllocatorDefault, kFactoryUUID);
+    }
+    CFPlugInAddInstanceForFactory(gFactoryUUID);
+    return gDriverRef;
 }
 
 static HRESULT STDMETHODCALLTYPE QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outInterface) {
@@ -159,8 +154,8 @@ static HRESULT STDMETHODCALLTYPE QueryInterface(void *inDriver, REFIID inUUID, L
     }
 
     if (UUIDEqual(inUUID, IUnknownUUID) || UUIDEqual(inUUID, kAudioServerPlugInDriverInterfaceUUID)) {
-        *outInterface = inDriver;
-        AddRef(inDriver);
+        *outInterface = gDriverRef;
+        AddRef(gDriverRef);
         return S_OK;
     }
 
@@ -169,24 +164,27 @@ static HRESULT STDMETHODCALLTYPE QueryInterface(void *inDriver, REFIID inUUID, L
 }
 
 static ULONG STDMETHODCALLTYPE AddRef(void *inDriver) {
-    VirtualMicDriver *driver = (VirtualMicDriver *)inDriver;
-    driver->refCount += 1;
-    return driver->refCount;
+    (void)inDriver;
+    gRefCount += 1;
+    return gRefCount;
 }
 
 static ULONG STDMETHODCALLTYPE Release(void *inDriver) {
-    VirtualMicDriver *driver = (VirtualMicDriver *)inDriver;
-    if (driver->refCount > 0) {
-        driver->refCount -= 1;
+    (void)inDriver;
+    if (gRefCount > 0) {
+        gRefCount -= 1;
     }
-    return driver->refCount;
+    if (gRefCount == 0 && gFactoryUUID != NULL) {
+        CFPlugInRemoveInstanceForFactory(gFactoryUUID);
+    }
+    return gRefCount;
 }
 
 static OSStatus STDMETHODCALLTYPE Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugInHostRef inHost) {
-    VirtualMicDriver *driver = Driver(inDriver);
-    driver->host = inHost;
-    driver->clockSeed = 1;
-    driver->startHostTime = mach_absolute_time();
+    (void)inDriver;
+    gHost = inHost;
+    gClockSeed = 1;
+    gStartHostTime = mach_absolute_time();
     return 0;
 }
 
@@ -245,6 +243,7 @@ static Boolean STDMETHODCALLTYPE HasProperty(AudioServerPlugInDriverRef inDriver
                 case kAudioObjectPropertyName:
                 case kAudioObjectPropertyManufacturer:
                 case kAudioObjectPropertyOwnedObjects:
+                case kAudioPlugInPropertyResourceBundle:
                 case kAudioPlugInPropertyDeviceList:
                 case kAudioPlugInPropertyTranslateUIDToDevice:
                     return true;
@@ -271,6 +270,14 @@ static Boolean STDMETHODCALLTYPE HasProperty(AudioServerPlugInDriverRef inDriver
                 case kAudioDevicePropertyAvailableNominalSampleRates:
                 case kAudioDevicePropertyLatency:
                 case kAudioDevicePropertySafetyOffset:
+                case kAudioDevicePropertyClockDomain:
+                case kAudioDevicePropertyZeroTimeStampPeriod:
+                case kAudioDevicePropertyPreferredChannelsForStereo:
+                case kAudioDevicePropertyDeviceCanBeDefaultDevice:
+                case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
+                case kAudioDevicePropertyRelatedDevices:
+                case kAudioDevicePropertyIsHidden:
+                case kAudioObjectPropertyControlList:
                     return true;
                 default:
                     return false;
@@ -332,6 +339,7 @@ static OSStatus STDMETHODCALLTYPE GetPropertyDataSize(AudioServerPlugInDriverRef
                     return 0;
                 case kAudioObjectPropertyName:
                 case kAudioObjectPropertyManufacturer:
+                case kAudioPlugInPropertyResourceBundle:
                     *outDataSize = sizeof(CFStringRef);
                     return 0;
                 case kAudioObjectPropertyOwnedObjects:
@@ -353,6 +361,11 @@ static OSStatus STDMETHODCALLTYPE GetPropertyDataSize(AudioServerPlugInDriverRef
                 case kAudioDevicePropertyDeviceIsRunning:
                 case kAudioDevicePropertyLatency:
                 case kAudioDevicePropertySafetyOffset:
+                case kAudioDevicePropertyClockDomain:
+                case kAudioDevicePropertyZeroTimeStampPeriod:
+                case kAudioDevicePropertyDeviceCanBeDefaultDevice:
+                case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
+                case kAudioDevicePropertyIsHidden:
                     *outDataSize = sizeof(UInt32);
                     return 0;
                 case kAudioObjectPropertyName:
@@ -363,6 +376,7 @@ static OSStatus STDMETHODCALLTYPE GetPropertyDataSize(AudioServerPlugInDriverRef
                     return 0;
                 case kAudioObjectPropertyOwnedObjects:
                 case kAudioDevicePropertyStreams:
+                case kAudioDevicePropertyRelatedDevices:
                     *outDataSize = sizeof(AudioObjectID);
                     return 0;
                 case kAudioDevicePropertyNominalSampleRate:
@@ -370,6 +384,12 @@ static OSStatus STDMETHODCALLTYPE GetPropertyDataSize(AudioServerPlugInDriverRef
                     return 0;
                 case kAudioDevicePropertyAvailableNominalSampleRates:
                     *outDataSize = sizeof(AudioValueRange);
+                    return 0;
+                case kAudioDevicePropertyPreferredChannelsForStereo:
+                    *outDataSize = sizeof(UInt32) * 2;
+                    return 0;
+                case kAudioObjectPropertyControlList:
+                    *outDataSize = 0;
                     return 0;
                 case kAudioDevicePropertyStreamConfiguration:
                     *outDataSize = offsetof(AudioBufferList, mBuffers) + sizeof(AudioBuffer);
@@ -436,6 +456,8 @@ static OSStatus STDMETHODCALLTYPE GetPropertyData(AudioServerPlugInDriverRef inD
                     return WriteCFString(CFSTR("Vox Virtual Mic Plug-In"), inDataSize, outDataSize, outData);
                 case kAudioObjectPropertyManufacturer:
                     return WriteCFString(ManufacturerName(), inDataSize, outDataSize, outData);
+                case kAudioPlugInPropertyResourceBundle:
+                    return WriteCFString(ResourceBundlePath(), inDataSize, outDataSize, outData);
                 case kAudioObjectPropertyOwnedObjects:
                 case kAudioPlugInPropertyDeviceList:
                     return WriteObjectID(kObjectID_Device, inDataSize, outDataSize, outData);
@@ -475,6 +497,8 @@ static OSStatus STDMETHODCALLTYPE GetPropertyData(AudioServerPlugInDriverRef inD
                         return 0;
                     }
                     return WriteObjectID(kObjectID_Stream_Input, inDataSize, outDataSize, outData);
+                case kAudioDevicePropertyRelatedDevices:
+                    return WriteObjectID(kObjectID_Device, inDataSize, outDataSize, outData);
                 case kAudioDevicePropertyDeviceUID:
                 case kAudioDevicePropertyModelUID:
                     return WriteCFString(DeviceUID(), inDataSize, outDataSize, outData);
@@ -487,7 +511,27 @@ static OSStatus STDMETHODCALLTYPE GetPropertyData(AudioServerPlugInDriverRef inD
                     *outDataSize = sizeof(UInt32);
                     return 0;
                 case kAudioDevicePropertyDeviceIsRunning:
-                    *((UInt32 *)outData) = Driver(inDriver)->activeIOCount > 0 ? 1 : 0;
+                    *((UInt32 *)outData) = gActiveIOCount > 0 ? 1 : 0;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioDevicePropertyClockDomain:
+                    *((UInt32 *)outData) = 0;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioDevicePropertyZeroTimeStampPeriod:
+                    *((UInt32 *)outData) = 512;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioDevicePropertyDeviceCanBeDefaultDevice:
+                    *((UInt32 *)outData) = 1;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
+                    *((UInt32 *)outData) = 0;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioDevicePropertyIsHidden:
+                    *((UInt32 *)outData) = 0;
                     *outDataSize = sizeof(UInt32);
                     return 0;
                 case kAudioDevicePropertyNominalSampleRate:
@@ -503,6 +547,19 @@ static OSStatus STDMETHODCALLTYPE GetPropertyData(AudioServerPlugInDriverRef inD
                     *outDataSize = sizeof(range);
                     return 0;
                 }
+                case kAudioDevicePropertyPreferredChannelsForStereo: {
+                    if (inDataSize < sizeof(UInt32) * 2) {
+                        return kAudioHardwareBadPropertySizeError;
+                    }
+                    UInt32 *channels = (UInt32 *)outData;
+                    channels[0] = 1;
+                    channels[1] = 1;
+                    *outDataSize = sizeof(UInt32) * 2;
+                    return 0;
+                }
+                case kAudioObjectPropertyControlList:
+                    *outDataSize = 0;
+                    return 0;
                 case kAudioDevicePropertyStreamConfiguration: {
                     UInt32 size = offsetof(AudioBufferList, mBuffers) + sizeof(AudioBuffer);
                     if (inDataSize < size) {
@@ -608,17 +665,16 @@ static OSStatus STDMETHODCALLTYPE StartIO(AudioServerPlugInDriverRef inDriver, A
         return kAudioHardwareBadObjectError;
     }
 
-    VirtualMicDriver *driver = Driver(inDriver);
-    if (driver->activeIOCount == 0) {
-        driver->startHostTime = mach_absolute_time();
-        driver->clockSeed += 1;
-        if (driver->reader == NULL) {
+        if (gActiveIOCount == 0) {
+        gStartHostTime = mach_absolute_time();
+        gClockSeed += 1;
+        if (gReader == NULL) {
             int err = 0;
-            driver->reader = vmic_reader_open(NULL, &err);
+            gReader = vmic_reader_open(NULL, &err);
             (void)err;
         }
     }
-    driver->activeIOCount += 1;
+    gActiveIOCount += 1;
     return 0;
 }
 
@@ -628,13 +684,12 @@ static OSStatus STDMETHODCALLTYPE StopIO(AudioServerPlugInDriverRef inDriver, Au
         return kAudioHardwareBadObjectError;
     }
 
-    VirtualMicDriver *driver = Driver(inDriver);
-    if (driver->activeIOCount > 0) {
-        driver->activeIOCount -= 1;
+        if (gActiveIOCount > 0) {
+        gActiveIOCount -= 1;
     }
-    if (driver->activeIOCount == 0 && driver->reader != NULL) {
-        vmic_reader_close(driver->reader);
-        driver->reader = NULL;
+    if (gActiveIOCount == 0 && gReader != NULL) {
+        vmic_reader_close(gReader);
+        gReader = NULL;
     }
     return 0;
 }
@@ -645,19 +700,18 @@ static OSStatus STDMETHODCALLTYPE GetZeroTimeStamp(AudioServerPlugInDriverRef in
         return kAudioHardwareIllegalOperationError;
     }
 
-    VirtualMicDriver *driver = Driver(inDriver);
-    uint64_t now = mach_absolute_time();
+        uint64_t now = mach_absolute_time();
     mach_timebase_info_data_t timebase;
     mach_timebase_info(&timebase);
 
     long double elapsedNano = 0.0;
-    if (now >= driver->startHostTime) {
-        elapsedNano = ((long double)(now - driver->startHostTime) * (long double)timebase.numer) / (long double)timebase.denom;
+    if (now >= gStartHostTime) {
+        elapsedNano = ((long double)(now - gStartHostTime) * (long double)timebase.numer) / (long double)timebase.denom;
     }
 
     *outSampleTime = (Float64)(elapsedNano / 1000000000.0L * VMIC_DEFAULT_SAMPLE_RATE);
     *outHostTime = now;
-    *outSeed = driver->clockSeed;
+    *outSeed = gClockSeed;
     return 0;
 }
 
@@ -697,15 +751,14 @@ static OSStatus STDMETHODCALLTYPE DoIOOperation(AudioServerPlugInDriverRef inDri
     Float32 *buffer = (Float32 *)ioMainBuffer;
     memset(buffer, 0, sizeof(Float32) * inIOBufferFrameSize);
 
-    VirtualMicDriver *driver = Driver(inDriver);
-    if (driver->reader == NULL) {
+        if (gReader == NULL) {
         int err = 0;
-        driver->reader = vmic_reader_open(NULL, &err);
+        gReader = vmic_reader_open(NULL, &err);
         (void)err;
     }
 
-    if (driver->reader != NULL) {
-        vmic_reader_dequeue(driver->reader, buffer, inIOBufferFrameSize);
+    if (gReader != NULL) {
+        vmic_reader_dequeue(gReader, buffer, inIOBufferFrameSize);
     }
     return 0;
 }

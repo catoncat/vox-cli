@@ -4,54 +4,81 @@
 
 目标：
 
-- 先做一个系统可见的虚拟输入设备
-- 再把本地音频文件 / 后续实时 DSP 输出喂进去
+- 提供一个系统可见的虚拟输入设备 `Vox Virtual Mic`
+- 把本地音频文件或后续实时 DSP 输出喂进去
 - 为微信、会议软件、实时变声、ASR 联动打基础
 
-当前结构：
+## 现在已经能做什么
 
-- `Package.swift` + `Sources/vmicctl`：helper CLI，负责准备测试音/文件并写入共享 ring buffer
-- `shared/`：helper 与 driver 共享的 ring buffer 协议与实现
-- `driver/`：`AudioServerPlugIn` skeleton，后续暴露成系统虚拟麦克风
-- `docs/`：架构、协议、验证计划
-- `scripts/`：构建/安装/卸载/重载系统音频服务脚本
+- 构建 helper：`vox-vmicctl`
+- 构建并安装 HAL driver：`VoxVirtualMic.driver`
+- 在系统音频设备中枚举出 `Vox Virtual Mic`
+- 往虚拟麦克风写测试音或本地音频文件
+- 用支持选择输入设备的软件把它当麦克风录入
 
-## 当前状态
+## 一次跑通
 
-已经打通：
+```bash
+cd native/vox-vmic
+make install-driver
+.build/debug/vox-vmicctl prime-sine --seconds 2 --frequency 660
+make probe-driver
+```
 
-- `vox-vmicctl prime-sine`
-- `vox-vmicctl enqueue <audio-file>`
-- `vox-vmicctl status`
-- `driver/` 可继续朝编译成功推进
+如果 `system_profiler` 或 `ffmpeg` 里能看到 `Vox Virtual Mic`，说明驱动已加载成功。
+
+## 实际使用
+
+### 1) 往虚拟麦克风写测试音
+
+```bash
+cd /Users/envvar/work/repos/vox-cli
+uv run python -m vox_cli.main vmic prime-sine --seconds 2 --frequency 660
+```
+
+### 2) 往虚拟麦克风写本地音频文件
+
+```bash
+cd /Users/envvar/work/repos/vox-cli
+uv run python -m vox_cli.main vmic enqueue --audio /path/to/input.wav
+```
+
+### 3) 在目标 App 里选输入设备
+
+选择：`Vox Virtual Mic`
+
+可用于：
+
+- 微信 Mac
+- QuickTime Player
+- ffmpeg / OBS / 会议软件
+
+## 常用命令
+
+```bash
+cd /Users/envvar/work/repos/vox-cli/native/vox-vmic
+make build-helper
+make build-driver
+make install-driver
+make uninstall-driver
+make probe-driver
+```
+
+```bash
+cd /Users/envvar/work/repos/vox-cli
+uv run python -m vox_cli.main vmic status
+uv run python -m vox_cli.main vmic prime-sine --seconds 2 --frequency 660
+uv run python -m vox_cli.main vmic enqueue --audio /path/to/file.wav
+uv run python -m vox_cli.main vmic build-driver
+```
+
+## 当前边界
 
 还没做：
 
-- 完整 HAL 对象属性覆盖
-- 安装后在 `Audio MIDI 设置` 成功枚举
-- 微信/会议软件真实验证
-- 实时 feeder / 变声 / ASR tap
+- 实时 feeder / 实时变声
+- menubar helper app
+- ASR tap / monitor output
+- 更完整的 HAL 属性与控制项
 
-## 快速验证
-
-```bash
-cd native/vox-vmic
-make build-helper
-.build/debug/vox-vmicctl prime-sine --seconds 1.5 --frequency 440
-.build/debug/vox-vmicctl status
-```
-
-构建 driver：
-
-```bash
-cd native/vox-vmic
-make build-driver
-```
-
-## 高风险脚本
-
-下面这些脚本会改系统音频环境，默认不自动执行：
-
-- `scripts/install-driver.sh`
-- `scripts/uninstall-driver.sh`
-- `scripts/restart-coreaudiod.sh`
+但作为 MVP，已经可以把它当成一个可安装、可枚举、可喂音频的虚拟麦克风来用了。

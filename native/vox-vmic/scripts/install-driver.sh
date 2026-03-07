@@ -8,8 +8,10 @@ if [[ ! -d "$SRC" ]]; then
   bash "$ROOT/scripts/build-driver.sh"
 fi
 
-echo "About to install to $DST"
+echo "Installing $DST"
 sudo rm -rf "$DST"
 sudo cp -R "$SRC" "$DST"
+sudo killall coreaudiod || true
+
 echo "installed: $DST"
-echo "next: sudo launchctl kickstart -k system/com.apple.audio.coreaudiod"
+echo "reloaded: coreaudiod"
