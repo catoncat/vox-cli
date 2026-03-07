@@ -12,6 +12,9 @@
 
 ## 0. Skills 单入口安装（推荐）
 
+<details>
+<summary>展开查看 Skills 安装方式</summary>
+
 如果你希望通过自然语言使用 `vox` 全能力（安装、模型管理、ASR/TTS、pipeline），推荐安装本仓库内置 skill：
 
 ```bash
@@ -23,6 +26,8 @@ npx skills add catoncat/vox-cli --skill vox -g -y
 - skill 路径在仓库内：`.agents/skills/vox`
 - 首次执行会自动做平台守卫（仅 `macOS arm64`）并默认安装依赖：`uv`、`ffmpeg`、`portaudio`
 - CLI 安装优先 `uv`（可通过环境变量覆盖安装源）
+
+</details>
 
 ---
 
@@ -51,7 +56,7 @@ npx skills add catoncat/vox-cli --skill vox -g -y
 ### 3.1 安装依赖
 
 ```bash
-cd /Users/envvar/work/repos/vox-cli
+cd /path/to/vox-cli
 uv sync
 ```
 
@@ -80,7 +85,7 @@ uv run vox doctor --json
 如果你在本地开发 `vox-cli`，推荐用内置更新命令把当前仓库安装到全局：
 
 ```bash
-cd /Users/envvar/work/repos/vox-cli
+cd /path/to/vox-cli
 uv run vox self update --repo .
 ```
 
@@ -93,7 +98,7 @@ uv run vox self update --repo . --dry-run
 如果全局 `vox` 还是旧版，无法识别 `self update`，用手动兜底：
 
 ```bash
-cd /Users/envvar/work/repos/vox-cli
+cd /path/to/vox-cli
 uv build
 uv tool install --force --prerelease=allow dist/vox_cli-0.1.0-py3-none-any.whl
 ```
@@ -105,6 +110,9 @@ uv tool install --force --prerelease=allow dist/vox_cli-0.1.0-py3-none-any.whl
 ## 4. 核心能力
 
 ### 4.1 模型注册
+
+<details>
+<summary>展开查看内置模型清单</summary>
 
 内置模型：
 
@@ -119,6 +127,8 @@ uv tool install --force --prerelease=allow dist/vox_cli-0.1.0-py3-none-any.whl
 2. ASR：
    - `qwen-asr-1.7b-8bit` -> `mlx-community/Qwen3-ASR-1.7B-8bit`
    - `qwen-asr-1.7b-4bit` -> `mlx-community/Qwen3-ASR-1.7B-4bit`
+
+</details>
 
 ### 4.2 ASR 自动选型
 
@@ -164,6 +174,9 @@ default_model = "qwen-tts-1.7b"
 
 ### 5.1 环境变量优先级
 
+<details>
+<summary>展开查看环境变量与优先级</summary>
+
 从高到低：
 
 1. 环境变量
@@ -178,6 +191,8 @@ default_model = "qwen-tts-1.7b"
 - `HF_HUB_CACHE`：覆盖 Hugging Face 缓存目录
 - `VOX_ASR_DEFAULT_MODEL`：覆盖 ASR 默认模型
 - `VOX_ASR_MEMORY_THRESHOLD_GB`：覆盖自动选型阈值
+
+</details>
 
 查看当前生效配置：
 
@@ -352,18 +367,29 @@ uv run vox dictation --lang zh --model auto
 
 ```bash
 # 开发态验证当前仓库代码
-cd /Users/envvar/work/repos/vox-cli
+cd /path/to/vox-cli
 uv run vox dictation --lang zh --rebuild-native
 
 # 更新全局命令后日常使用
 vox dictation --lang zh
 ```
 
+补充说明：
+
+- 语音段过短或过安静时会直接丢弃，不触发识别
+- 前置静音和长停顿会尽量在前端门控，减少无意义音频送入后端
+- 启动时会打印 helper 版本指纹，方便确认不是旧二进制
+
+<details>
+<summary>展开查看 dictation 排障日志关键字</summary>
+
 如果 `start/stop` 正常，但没有文字输出，重点检查这几类日志：
 
 - `[vox-dictation][audio] sending ...`：前端是否真的送出音频块
 - `[session-server] append_pcm16 ...`：后端是否真的收到音频块
 - `[session-server] transcript ...`：后端是否真的返回识别结果
+
+</details>
 
 ### 来源与致谢
 
@@ -489,7 +515,7 @@ Hugging Face 模型缓存默认不在 `~/.vox`，而在：
 ## 9.1 第一次启动（推荐）
 
 ```bash
-cd /Users/envvar/work/repos/vox-cli
+cd /path/to/vox-cli
 uv sync
 uv run vox doctor --json
 uv run vox model status --json
@@ -521,13 +547,16 @@ uv run vox tts clone --profile narrator --text "这是目标文本" --out ./out.
 ## 9.4 更新全局命令
 
 ```bash
-cd /Users/envvar/work/repos/vox-cli
+cd /path/to/vox-cli
 uv run vox self update --repo .
 ```
 
 ---
 
 ## 10. 故障排查
+
+<details>
+<summary>展开查看故障排查</summary>
 
 ### 10.1 `doctor` 失败
 
@@ -593,7 +622,12 @@ HF_ENDPOINT=https://huggingface.co uv run vox model pull --model qwen-asr-1.7b-4
 - 音量过低（RMS < 0.005）
 - 音频文件路径错误
 
+</details>
+
 ---
+
+<details>
+<summary>展开查看集成建议与路线图</summary>
 
 ## 11. 输出与集成建议
 
@@ -611,3 +645,5 @@ HF_ENDPOINT=https://huggingface.co uv run vox model pull --model qwen-asr-1.7b-4
 2. 增加 `profile sample list/remove`
 3. 把 `dictation` 的 partial UI 做到更平滑（当前以最终提交为主）
 4. 增加结构化日志与 Prometheus 指标导出
+
+</details>

@@ -89,6 +89,7 @@ bash scripts/failure_digest.sh
 3. 若命令失败，先给重试命令，再调用 `log_failure.sh`。
 4. 只有预检失败或命令缺失时才进入安装流程。
 5. 禁止跳过模型校验直接执行重操作（TTS clone/custom/design、pipeline、流式转写）。
+6. 运行示例或回归测试时，输出文件必须写到 `/tmp` 或 `~/.vox/outputs`，不要写到仓库目录。
 
 ## 常用命令模板
 
