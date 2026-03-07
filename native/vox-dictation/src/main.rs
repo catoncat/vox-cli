@@ -1,7 +1,7 @@
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use block2::RcBlock;
 use clap::Parser;
@@ -29,10 +29,17 @@ const NX_DEVICERCMDKEYMASK: u64 = 0x10;
 const TARGET_SAMPLE_RATE: f64 = 16_000.0;
 const BUILD_GIT_REV: &str = env!("VOX_DICTATION_GIT_REV");
 const BUILD_STAMP: &str = env!("VOX_DICTATION_BUILD_STAMP");
+const MIN_UTTERANCE_MS: u64 = 350;
+const SPEECH_PEAK_THRESHOLD: f32 = 0.015;
+const SPEECH_RMS_THRESHOLD: f32 = 0.004;
+const SPEECH_HANGOVER_MS: u64 = 180;
 
 static BACKEND_READY: AtomicBool = AtomicBool::new(false);
 static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static VOICE_STARTED: AtomicBool = AtomicBool::new(false);
+static SENT_SAMPLES: AtomicUsize = AtomicUsize::new(0);
+static LAST_SPEECH_MS: AtomicU64 = AtomicU64::new(0);
 static mut CONTROLLER: *mut Controller = std::ptr::null_mut();
 
 #[derive(Parser, Debug)]
@@ -85,6 +92,9 @@ impl Controller {
 
         eprintln!("[vox-dictation] recording started...");
         IS_RECORDING.store(true, Ordering::SeqCst);
+        VOICE_STARTED.store(false, Ordering::SeqCst);
+        SENT_SAMPLES.store(0, Ordering::SeqCst);
+        LAST_SPEECH_MS.store(now_millis(), Ordering::SeqCst);
         set_status_icon(&self.status_item, true, mtm);
         let _ = self.backend_tx.send(BackendCommand::Reset);
 
@@ -104,9 +114,23 @@ impl Controller {
                     let ptr = ch0.as_ptr();
                     let slice = unsafe { std::slice::from_raw_parts(ptr, frames) };
                     let resampled = resample_linear(slice, native_sample_rate, TARGET_SAMPLE_RATE as u32);
-                    let pcm = float_to_i16(&resampled);
-                    eprintln!("[vox-dictation][audio] sending frames={} resampled={} pcm={}", frames, resampled.len(), pcm.len());
-                    let _ = backend_audio_tx.send(BackendCommand::Audio(pcm));
+                    let (peak, rms) = audio_levels(&resampled);
+                    let is_speech = peak >= SPEECH_PEAK_THRESHOLD || rms >= SPEECH_RMS_THRESHOLD;
+                    let now = now_millis();
+                    if is_speech {
+                        VOICE_STARTED.store(true, Ordering::SeqCst);
+                        LAST_SPEECH_MS.store(now, Ordering::SeqCst);
+                    }
+
+                    let voice_started = VOICE_STARTED.load(Ordering::SeqCst);
+                    let in_hangover = voice_started
+                        && now.saturating_sub(LAST_SPEECH_MS.load(Ordering::SeqCst)) <= SPEECH_HANGOVER_MS;
+
+                    if voice_started && (is_speech || in_hangover) {
+                        let pcm = float_to_i16(&resampled);
+                        SENT_SAMPLES.fetch_add(pcm.len(), Ordering::SeqCst);
+                        let _ = backend_audio_tx.send(BackendCommand::Audio(pcm));
+                    }
                 }
             },
         );
@@ -139,8 +163,16 @@ impl Controller {
         let microphone = unsafe { self.audio_engine.inputNode() };
         unsafe { microphone.removeTapOnBus(0) };
         unsafe { self.audio_engine.stop() };
-        eprintln!("[vox-dictation] sending FLUSH to backend");
-        let _ = self.backend_tx.send(BackendCommand::Flush);
+        let sent_samples = SENT_SAMPLES.load(Ordering::SeqCst);
+        let min_samples = (TARGET_SAMPLE_RATE as usize * MIN_UTTERANCE_MS as usize) / 1000;
+        let voice_started = VOICE_STARTED.load(Ordering::SeqCst);
+
+        if !voice_started || sent_samples < min_samples {
+            eprintln!("[vox-dictation] discarded short/quiet utterance");
+            let _ = self.backend_tx.send(BackendCommand::Reset);
+        } else {
+            let _ = self.backend_tx.send(BackendCommand::Flush);
+        }
     }
 }
 
@@ -154,21 +186,14 @@ unsafe extern "C-unwind" fn event_tap_callback(
         let flags = CGEvent::flags(Some(event.as_ref()));
         let device_flags = flags.0 & 0xFFFF;
         let right_cmd_pressed = (device_flags & NX_DEVICERCMDKEYMASK) != 0;
-        eprintln!(
-            "[vox-dictation][flagsChanged] raw_flags=0x{:x} device_flags=0x{:x} right_cmd_pressed={}",
-            flags.0, device_flags, right_cmd_pressed
-        );
-
         static WAS_DOWN: AtomicBool = AtomicBool::new(false);
         let was_down = WAS_DOWN.load(Ordering::SeqCst);
 
         if right_cmd_pressed && !was_down {
             WAS_DOWN.store(true, Ordering::SeqCst);
-            eprintln!("[vox-dictation][flagsChanged] -> START on main");
             dispatch_action_on_main(MainAction::Start);
         } else if !right_cmd_pressed && was_down {
             WAS_DOWN.store(false, Ordering::SeqCst);
-            eprintln!("[vox-dictation][flagsChanged] -> STOP on main");
             dispatch_action_on_main(MainAction::Stop);
         }
     }
@@ -254,6 +279,31 @@ fn float_to_i16(samples: &[f32]) -> Vec<i16> {
         .iter()
         .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
         .collect()
+}
+
+fn audio_levels(samples: &[f32]) -> (f32, f32) {
+    if samples.is_empty() {
+        return (0.0, 0.0);
+    }
+
+    let mut peak = 0.0f32;
+    let mut power = 0.0f32;
+    for sample in samples {
+        let abs = sample.abs();
+        if abs > peak {
+            peak = abs;
+        }
+        power += sample * sample;
+    }
+    let rms = (power / samples.len() as f32).sqrt();
+    (peak, rms)
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn resample_linear(samples: &[f32], source_hz: u32, target_hz: u32) -> Vec<f32> {

@@ -36,7 +36,6 @@ class RealtimeASRSession:
         if chunk.size == 0:
             return
         self._chunks.append(chunk.astype(np.float32) / 32768.0)
-        print(f"[session-server] append_pcm16 samples={chunk.size} chunks={len(self._chunks)}", flush=True)
 
     def reset(self) -> None:
         self._chunks.clear()
@@ -54,10 +53,8 @@ class RealtimeASRSession:
     def transcribe(self, *, partial: bool) -> RealtimeTranscript:
         audio = self._concat_audio()
         if audio is None or audio.size == 0:
-            print(f"[session-server] transcribe partial={partial} audio=empty", flush=True)
             return RealtimeTranscript(text="", is_partial=partial, language=self.language)
 
-        print(f"[session-server] transcribe partial={partial} samples={audio.size}", flush=True)
 
         decode_options: dict[str, object] = {}
         if self.language:
@@ -86,7 +83,6 @@ class RealtimeASRSession:
             language=(getattr(result, "language", None) or self.language),
             segments=segments,
         )
-        print(f"[session-server] transcript partial={partial} text={text!r}", flush=True)
         if not partial:
             self.reset()
         return transcript
