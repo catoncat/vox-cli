@@ -7,6 +7,7 @@
 - 下载策略：默认国内镜像 `hf-mirror`，失败自动回退官方 Hugging Face
 - 缓存策略：优先复用本地 Hugging Face 缓存，避免重复下载
 - Dictation：原生 macOS 按住说话输入，前端参考 `picc`，后端复用本地 Qwen ASR 流式会话
+- 设计文档：`docs/runtime-concurrency-redesign.md`（并发治理、模型加载与后续队列化演进）
 
 ---
 
@@ -117,11 +118,11 @@ uv tool install --force --prerelease=allow dist/vox_cli-0.1.0-py3-none-any.whl
 内置模型：
 
 1. TTS：
-   - `qwen-tts-1.7b` -> `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16`（默认 clone）
+   - `qwen-tts-1.7b` -> `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16`
    - `qwen-tts-1.7b-base-8bit` -> `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit`
    - `qwen-tts-1.7b-customvoice-8bit` -> `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit`
    - `qwen-tts-1.7b-voicedesign-8bit` -> `mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit`
-   - `qwen-tts-0.6b-base-8bit` -> `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit`
+   - `qwen-tts-0.6b-base-8bit` -> `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit`（当前默认）
    - `qwen-tts-0.6b-customvoice-8bit` -> `mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit`
    - `qwen-tts-0.6b-voicedesign-8bit` -> `mlx-community/Qwen3-TTS-12Hz-0.6B-VoiceDesign-8bit`
 2. ASR：
@@ -141,12 +142,22 @@ uv tool install --force --prerelease=allow dist/vox_cli-0.1.0-py3-none-any.whl
 
 ### 4.3 下载与缓存
 
-- 先检查本地缓存完整性（`refs/main`、`snapshots`、权重文件、无 `.incomplete`）
-- 校验通过则直接复用
-- 校验不通过才触发下载
+- 运行态默认先做快速校验（`refs/main`、snapshot、权重文件）
+- `model verify` 才会做深度校验（含 `.incomplete` 扫描）
+- 推理链路会复用本地 snapshot path，但每次命令仍会在当前进程重新加载模型
 - 下载端点默认顺序：
   1. `https://hf-mirror.com`
   2. `https://huggingface.co`
+
+### 4.4 并发与资源治理
+
+- `model pull`、`asr`、`tts`、`pipeline` 等重命令默认会等待资源锁
+- `qwen-tts-0.6b-base-8bit` 默认允许最多 2 条并行推理；其余 TTS 模型仍保持单并行
+- `clone/custom/design/pipeline` 在未显式传 `--model` 时，都会按当前配置选择各自默认模型
+- 等待日志输出到 stderr，不会污染 `--json` 的 stdout
+- 可用 `--no-wait` 改成立即失败，或用 `--wait-timeout` 调整等待上限
+- 当前 `task` 仍是任务记录/审计，不是后台 worker 队列
+- 详细设计见 `docs/runtime-concurrency-redesign.md`
 
 ---
 
@@ -159,6 +170,9 @@ uv tool install --force --prerelease=allow dist/vox_cli-0.1.0-py3-none-any.whl
 ```toml
 [runtime]
 home_dir = "~/.vox"
+wait_for_lock = true
+lock_wait_timeout_sec = 1800
+tts_small_base_max_parallel = 2
 
 [hf]
 endpoints = ["https://hf-mirror.com", "https://huggingface.co"]
@@ -169,7 +183,9 @@ default_model = "auto" # auto | qwen-asr-1.7b-8bit | qwen-asr-1.7b-4bit
 memory_threshold_gb = 32
 
 [tts]
-default_model = "qwen-tts-1.7b"
+default_model = "qwen-tts-0.6b-base-8bit"
+default_custom_model = "qwen-tts-0.6b-customvoice-8bit"
+default_design_model = "qwen-tts-0.6b-voicedesign-8bit"
 ```
 
 ### 5.1 环境变量优先级
@@ -191,6 +207,11 @@ default_model = "qwen-tts-1.7b"
 - `HF_HUB_CACHE`：覆盖 Hugging Face 缓存目录
 - `VOX_ASR_DEFAULT_MODEL`：覆盖 ASR 默认模型
 - `VOX_ASR_MEMORY_THRESHOLD_GB`：覆盖自动选型阈值
+- `VOX_TTS_DEFAULT_MODEL`：覆盖 `clone/pipeline` 默认 TTS 模型
+- `VOX_TTS_DEFAULT_CUSTOM_MODEL`：覆盖 `custom` 默认 TTS 模型
+- `VOX_TTS_DEFAULT_DESIGN_MODEL`：覆盖 `design` 默认 TTS 模型
+
+锁等待行为默认走配置文件。
 
 </details>
 
@@ -241,7 +262,7 @@ uv run vox model status --json
 ### 校验指定模型是否完整
 
 ```bash
-uv run vox model verify --model qwen-tts-1.7b
+uv run vox model verify --model qwen-tts-0.6b-base-8bit
 ```
 
 ### 下载指定模型（若已完整则直接复用）
@@ -253,7 +274,7 @@ uv run vox model pull --model qwen-asr-1.7b-4bit
 ### 输出模型快照路径
 
 ```bash
-uv run vox model path --model qwen-tts-1.7b
+uv run vox model path --model qwen-tts-0.6b-base-8bit
 ```
 
 ## 7.2 `profile`
@@ -303,6 +324,8 @@ uv run vox asr transcribe \
 - `qwen-asr-1.7b-8bit`
 - `qwen-asr-1.7b-4bit`
 
+重命令同样支持：`--wait/--no-wait`、`--wait-timeout <sec>`。
+
 ### 流式转写（文件输入）
 
 ```bash
@@ -334,7 +357,7 @@ uv run vox asr stream \
 ### 常驻会话服务（`session-server`）
 
 ```bash
-uv run vox asr session-server --lang zh --model auto --port 8765
+uv run vox asr session-server --lang zh --model auto --port 8765 --wait
 ```
 
 协议说明：
@@ -353,7 +376,7 @@ uv run vox dictation --lang zh --model auto
 
 - 原生 macOS 前端，参考 `picc` 的 push-to-talk 体验
 - 默认监听右侧 `Command`：按下开始录音，松开提交当前语音段
-- `dictation` 前台运行时，后端会话日志直接输出到当前终端
+- 默认只输出关键状态与错误；加 `--verbose` 可看 helper 详细日志
 - 首次运行会自动用 `cargo build --release` 编译 `native/vox-dictation`
 - 启动时会打印 helper 版本指纹，例如：`v0.1.0 (<git-hash>, build <timestamp>)`
 
@@ -362,13 +385,14 @@ uv run vox dictation --lang zh --model auto
 - `--host` / `--port`：自定义本地会话服务地址
 - `--rebuild-native`：强制重编原生 helper
 - `--partial-interval-ms`：录音期间周期性请求 partial 结果
+- `--verbose`：打印 helper 详细排障日志
 
 推荐用法：
 
 ```bash
 # 开发态验证当前仓库代码
 cd /path/to/vox-cli
-uv run vox dictation --lang zh --rebuild-native
+uv run vox dictation --lang zh --rebuild-native --verbose
 
 # 更新全局命令后日常使用
 vox dictation --lang zh
@@ -379,15 +403,26 @@ vox dictation --lang zh
 - 语音段过短或过安静时会直接丢弃，不触发识别
 - 前置静音和长停顿会尽量在前端门控，减少无意义音频送入后端
 - 启动时会打印 helper 版本指纹，方便确认不是旧二进制
+- 会话服务日志写入 `~/.vox/logs/dictation-session.log`；启动失败时会自动附在报错里
 
 <details>
 <summary>展开查看 dictation 排障日志关键字</summary>
 
-如果 `start/stop` 正常，但没有文字输出，重点检查这几类日志：
+如果需要展开排查，建议先用：
 
-- `[vox-dictation][audio] sending ...`：前端是否真的送出音频块
-- `[session-server] append_pcm16 ...`：后端是否真的收到音频块
-- `[session-server] transcript ...`：后端是否真的返回识别结果
+```bash
+uv run vox dictation --lang zh --rebuild-native --verbose
+```
+
+重点看这几类日志：
+
+- `[vox-dictation] recording started...` / `recording stopped`
+- `[vox-dictation] backend ready`
+- `[vox-dictation] partial: ...`：仅在 `--partial-interval-ms > 0` 时可能出现
+- `[vox-dictation] final: ...`
+- `[vox-dictation] discarded short/quiet utterance`
+
+当前版本默认不再打印每块音频 / 每次转写的后端调试日志。
 
 </details>
 
@@ -404,20 +439,26 @@ vox dictation --lang zh
 
 ### 语音克隆（`clone`）
 
+未显式传 `--model` 时，默认使用 `tts.default_model`。
+
 ```bash
 uv run vox tts clone \
   --profile narrator \
   --text "你好，这是克隆后的语音" \
   --out ./out.wav \
-  --model qwen-tts-1.7b
+  --model qwen-tts-0.6b-base-8bit
 ```
 
 可选参数：
 
 - `--seed`
 - `--instruct`（仅当底层模型接口支持时生效）
+- `--wait/--no-wait`
+- `--wait-timeout <sec>`
 
 ### 预置说话人合成（`custom`）
+
+未显式传 `--model` 时，默认使用 `tts.default_custom_model`。
 
 ```bash
 uv run vox tts custom \
@@ -426,14 +467,18 @@ uv run vox tts custom \
   --language auto \
   --instruct "开心，语速自然" \
   --out ./custom.wav \
-  --model qwen-tts-1.7b-customvoice-8bit
+  --model qwen-tts-0.6b-customvoice-8bit
 ```
 
 可选参数：
 
 - `--seed`（仅当底层模型接口支持时生效）
+- `--wait/--no-wait`
+- `--wait-timeout <sec>`
 
 ### 声音设计合成（`design`）
+
+未显式传 `--model` 时，默认使用 `tts.default_design_model`。
 
 ```bash
 uv run vox tts design \
@@ -441,16 +486,20 @@ uv run vox tts design \
   --instruct "低沉男声，播音腔，语气稳重" \
   --language auto \
   --out ./design.wav \
-  --model qwen-tts-1.7b-voicedesign-8bit
+  --model qwen-tts-0.6b-voicedesign-8bit
 ```
 
 可选参数：
 
 - `--seed`（仅当底层模型接口支持时生效）
+- `--wait/--no-wait`
+- `--wait-timeout <sec>`
 
 ## 7.6 `pipeline`
 
 ### 一体化流程（先 ASR 再 TTS 克隆）
+
+未显式传 `--tts-model` 时，默认使用 `tts.default_model`。
 
 ```bash
 uv run vox pipeline run \
@@ -463,12 +512,14 @@ uv run vox pipeline run \
 可选：
 
 - `--asr-model auto|qwen-asr-1.7b-8bit|qwen-asr-1.7b-4bit`
-- `--tts-model qwen-tts-1.7b`
+- `--tts-model qwen-tts-0.6b-base-8bit`
 - `--out ./result.wav`
+- `--wait/--no-wait`
+- `--wait-timeout <sec>`
 
 ## 7.7 `task`
 
-所有关键操作会写入 SQLite 任务表。
+所有关键操作会写入 SQLite 任务表。当前阶段它用于任务记录与审计，不是后台执行队列。
 
 ### 查看任务列表
 
@@ -495,6 +546,7 @@ uv run vox task show --id <task_id>
 ├── vox.db
 ├── cache/
 │   └── voice_prompt/
+├── locks/
 ├── profiles/
 │   └── <profile_id>/
 └── outputs/
@@ -530,11 +582,11 @@ uv run vox model pull --model qwen-asr-1.7b-4bit
 ## 9.2 复用已下载缓存（不重复下载）
 
 ```bash
-uv run vox model verify --model qwen-tts-1.7b
+uv run vox model verify --model qwen-tts-0.6b-base-8bit
 uv run vox model status --json
 ```
 
-当 `verified=true` 时，推理会直接复用缓存。
+当 `verified=true` 时，说明本地 snapshot 可直接复用；但每次推理仍会在当前进程重新加载模型。
 
 ## 9.3 从 0 到语音克隆
 
@@ -574,6 +626,8 @@ uv run vox doctor --json
 
 ### 10.2 模型下载失败
 
+如果命令长时间停在等待日志，先用 `vox task list --json` 看是否已有重任务占用资源。
+
 1. 检查端点顺序：
    `uv run vox config show --pretty`
 2. 临时强制镜像：
@@ -605,16 +659,27 @@ HF_ENDPOINT=https://huggingface.co uv run vox model pull --model qwen-asr-1.7b-4
 
 ### 10.5 Dictation 没有输出文字
 
-重点观察当前终端里的这些日志：
+默认重点观察当前终端里的这些信号：
+
+- `[vox-dictation] discarded short/quiet utterance`
+- `[vox-dictation] backend not ready yet`
+- `[vox-dictation] backend error: ...`
+- `[vox-dictation] backend connect/read/write error: ...`
+
+如果需要更细的 helper 日志，重试：
+
+```bash
+uv run vox dictation --lang zh --rebuild-native --verbose
+```
+
+此时再看：
 
 - `[vox-dictation] recording started...` / `recording stopped`
-- `[vox-dictation][audio] sending ...`
-- `[session-server] append_pcm16 ...`
-- `[session-server] transcript ...`
+- `[vox-dictation] backend ready`
+- `[vox-dictation] partial: ...`
+- `[vox-dictation] final: ...`
 
-如果热键能开始/停止，但没有 `audio sending`，优先检查前端音频链路。
-如果有 `audio sending` 但没有 `append_pcm16`，优先检查本地 websocket 链路。
-如果有 `append_pcm16` 但没有 `transcript`，优先检查模型/音频格式。
+如果看起来是会话服务启动问题，查看 `~/.vox/logs/dictation-session.log`。
 
 ### 10.6 样本添加失败
 

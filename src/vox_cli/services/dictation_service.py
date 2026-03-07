@@ -116,6 +116,7 @@ def launch_dictation(
     port: int | None = None,
     rebuild_native: bool = False,
     partial_interval_ms: int = 0,
+    verbose: bool = False,
 ) -> int:
     resolved_model = resolve_asr_model_id(config, None if model == 'auto' else model)
     binary = ensure_native_binary(rebuild=rebuild_native)
@@ -145,6 +146,8 @@ def launch_dictation(
         '--partial-interval-ms',
         str(partial_interval_ms),
     ]
+    if verbose:
+        helper_cmd.append('--verbose')
 
     with log_path.open('a', encoding='utf-8') as log_handle:
         server_proc = subprocess.Popen(

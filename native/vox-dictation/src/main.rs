@@ -37,10 +37,19 @@ const SPEECH_HANGOVER_MS: u64 = 180;
 static BACKEND_READY: AtomicBool = AtomicBool::new(false);
 static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static VERBOSE: AtomicBool = AtomicBool::new(false);
 static VOICE_STARTED: AtomicBool = AtomicBool::new(false);
 static SENT_SAMPLES: AtomicUsize = AtomicUsize::new(0);
 static LAST_SPEECH_MS: AtomicU64 = AtomicU64::new(0);
 static mut CONTROLLER: *mut Controller = std::ptr::null_mut();
+
+macro_rules! verbose_log {
+    ($($arg:tt)*) => {
+        if VERBOSE.load(Ordering::SeqCst) {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -49,6 +58,9 @@ struct Args {
 
     #[arg(long, default_value_t = 0)]
     partial_interval_ms: u64,
+
+    #[arg(long, default_value_t = false, help = "Print verbose helper logs")]
+    verbose: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -90,7 +102,7 @@ impl Controller {
             return;
         }
 
-        eprintln!("[vox-dictation] recording started...");
+        verbose_log!("[vox-dictation] recording started...");
         IS_RECORDING.store(true, Ordering::SeqCst);
         VOICE_STARTED.store(false, Ordering::SeqCst);
         SENT_SAMPLES.store(0, Ordering::SeqCst);
@@ -102,7 +114,7 @@ impl Controller {
         let backend_audio_tx = self.backend_tx.clone();
         let native_format = unsafe { microphone.outputFormatForBus(0) };
         let native_sample_rate = unsafe { native_format.sampleRate() as u32 };
-        eprintln!("[vox-dictation] native sample rate: {}Hz", native_sample_rate);
+        verbose_log!("[vox-dictation] native sample rate: {}Hz", native_sample_rate);
         let tap_block = RcBlock::new(
             move |buffer: NonNull<AVAudioPCMBuffer>, _time: NonNull<AVAudioTime>| {
                 if !IS_RECORDING.load(Ordering::SeqCst) {
@@ -157,7 +169,7 @@ impl Controller {
             return;
         }
 
-        eprintln!("[vox-dictation] recording stopped");
+        verbose_log!("[vox-dictation] recording stopped");
         set_status_icon(&self.status_item, false, mtm);
 
         let microphone = unsafe { self.audio_engine.inputNode() };
@@ -349,7 +361,7 @@ fn spawn_backend_worker(server_url: String, partial_interval_ms: u64) -> Unbound
                 Ok((ws_stream, _)) => {
                     let (mut write, mut read) = ws_stream.split();
                     BACKEND_READY.store(true, Ordering::SeqCst);
-                    eprintln!("[vox-dictation] backend ready");
+                    verbose_log!("[vox-dictation] backend ready");
 
                     let writer_tx = thread_cmd_tx.clone();
                     let partial_thread = if partial_interval_ms > 0 {
@@ -382,10 +394,10 @@ fn spawn_backend_worker(server_url: String, partial_interval_ms: u64) -> Unbound
                                         } else if let Some(text) = msg.text {
                                             if msg.is_partial.unwrap_or(false) {
                                                 if !text.is_empty() {
-                                                    eprintln!("[vox-dictation] partial: {text}");
+                                                    verbose_log!("[vox-dictation] partial: {text}");
                                                 }
                                             } else if !text.trim().is_empty() {
-                                                eprintln!("[vox-dictation] final: {text}");
+                                                verbose_log!("[vox-dictation] final: {text}");
                                                 type_text(text.trim());
                                             }
                                         }
@@ -446,6 +458,7 @@ fn spawn_backend_worker(server_url: String, partial_interval_ms: u64) -> Unbound
 
 fn main() {
     let args = Args::parse();
+    VERBOSE.store(args.verbose, Ordering::SeqCst);
     let mtm = MainThreadMarker::new().expect("must run on main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
