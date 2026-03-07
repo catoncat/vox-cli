@@ -1,0 +1,721 @@
+#include "VirtualMicDriver.h"
+
+#include "VMicBridge.h"
+
+#include <CoreAudio/AudioHardware.h>
+#include <CoreAudio/AudioHardwareBase.h>
+#include <CoreFoundation/CFString.h>
+#include <mach/mach_time.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct VirtualMicDriver {
+    AudioServerPlugInDriverInterface *interface;
+    UInt32 refCount;
+    AudioServerPlugInHostRef host;
+    UInt32 activeIOCount;
+    UInt64 clockSeed;
+    UInt64 startHostTime;
+    VMicReader *reader;
+} VirtualMicDriver;
+
+static HRESULT STDMETHODCALLTYPE QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outInterface);
+static ULONG STDMETHODCALLTYPE AddRef(void *inDriver);
+static ULONG STDMETHODCALLTYPE Release(void *inDriver);
+static OSStatus STDMETHODCALLTYPE Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugInHostRef inHost);
+static OSStatus STDMETHODCALLTYPE CreateDevice(AudioServerPlugInDriverRef inDriver, CFDictionaryRef inDescription, const AudioServerPlugInClientInfo *inClientInfo, AudioObjectID *outDeviceObjectID);
+static OSStatus STDMETHODCALLTYPE DestroyDevice(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID);
+static OSStatus STDMETHODCALLTYPE AddDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo);
+static OSStatus STDMETHODCALLTYPE RemoveDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo);
+static OSStatus STDMETHODCALLTYPE PerformDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo);
+static OSStatus STDMETHODCALLTYPE AbortDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo);
+static Boolean STDMETHODCALLTYPE HasProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress);
+static OSStatus STDMETHODCALLTYPE IsPropertySettable(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, Boolean *outIsSettable);
+static OSStatus STDMETHODCALLTYPE GetPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 *outDataSize);
+static OSStatus STDMETHODCALLTYPE GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, UInt32 *outDataSize, void *outData);
+static OSStatus STDMETHODCALLTYPE SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, const void *inData);
+static OSStatus STDMETHODCALLTYPE StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID);
+static OSStatus STDMETHODCALLTYPE StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID);
+static OSStatus STDMETHODCALLTYPE GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, Float64 *outSampleTime, UInt64 *outHostTime, UInt64 *outSeed);
+static OSStatus STDMETHODCALLTYPE WillDoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, Boolean *outWillDo, Boolean *outWillDoInPlace);
+static OSStatus STDMETHODCALLTYPE BeginIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo);
+static OSStatus STDMETHODCALLTYPE DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo, void *ioMainBuffer, void *ioSecondaryBuffer);
+static OSStatus STDMETHODCALLTYPE EndIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo);
+
+static AudioServerPlugInDriverInterface gDriverInterface = {
+    NULL,
+    QueryInterface,
+    AddRef,
+    Release,
+    Initialize,
+    CreateDevice,
+    DestroyDevice,
+    AddDeviceClient,
+    RemoveDeviceClient,
+    PerformDeviceConfigurationChange,
+    AbortDeviceConfigurationChange,
+    HasProperty,
+    IsPropertySettable,
+    GetPropertyDataSize,
+    GetPropertyData,
+    SetPropertyData,
+    StartIO,
+    StopIO,
+    GetZeroTimeStamp,
+    WillDoIOOperation,
+    BeginIOOperation,
+    DoIOOperation,
+    EndIOOperation,
+};
+
+static VirtualMicDriver gDriver = {
+    .interface = &gDriverInterface,
+    .refCount = 1,
+    .host = NULL,
+    .activeIOCount = 0,
+    .clockSeed = 1,
+    .startHostTime = 0,
+    .reader = NULL,
+};
+
+static bool UUIDEqual(REFIID left, CFUUIDRef right) {
+    CFUUIDBytes bytes = CFUUIDGetUUIDBytes(right);
+    return memcmp(&left, &bytes, sizeof(CFUUIDBytes)) == 0;
+}
+
+static VirtualMicDriver *Driver(AudioServerPlugInDriverRef inDriver) {
+    return (VirtualMicDriver *)inDriver;
+}
+
+static AudioStreamBasicDescription VirtualMicFormat(void) {
+    AudioStreamBasicDescription asbd;
+    memset(&asbd, 0, sizeof(asbd));
+    asbd.mSampleRate = VMIC_DEFAULT_SAMPLE_RATE;
+    asbd.mFormatID = kAudioFormatLinearPCM;
+    asbd.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    asbd.mBytesPerPacket = sizeof(Float32);
+    asbd.mFramesPerPacket = 1;
+    asbd.mBytesPerFrame = sizeof(Float32);
+    asbd.mChannelsPerFrame = kVirtualMicChannelCount;
+    asbd.mBitsPerChannel = 32;
+    return asbd;
+}
+
+static AudioStreamRangedDescription VirtualMicRangedFormat(void) {
+    AudioStreamRangedDescription ranged;
+    memset(&ranged, 0, sizeof(ranged));
+    ranged.mFormat = VirtualMicFormat();
+    ranged.mSampleRateRange.mMinimum = VMIC_DEFAULT_SAMPLE_RATE;
+    ranged.mSampleRateRange.mMaximum = VMIC_DEFAULT_SAMPLE_RATE;
+    return ranged;
+}
+
+static OSStatus WriteCFString(CFStringRef value, UInt32 inDataSize, UInt32 *outDataSize, void *outData) {
+    if (inDataSize < sizeof(CFStringRef)) {
+        return kAudioHardwareBadPropertySizeError;
+    }
+    *((CFStringRef *)outData) = CFRetain(value);
+    *outDataSize = sizeof(CFStringRef);
+    return 0;
+}
+
+static OSStatus WriteObjectID(AudioObjectID value, UInt32 inDataSize, UInt32 *outDataSize, void *outData) {
+    if (inDataSize < sizeof(AudioObjectID)) {
+        return kAudioHardwareBadPropertySizeError;
+    }
+    *((AudioObjectID *)outData) = value;
+    *outDataSize = sizeof(AudioObjectID);
+    return 0;
+}
+
+static CFStringRef DeviceUID(void) {
+    return CFSTR("com.envvar.vox.vmic.device");
+}
+
+static CFStringRef ManufacturerName(void) {
+    return CFSTR("envvar");
+}
+
+static CFStringRef DeviceName(void) {
+    return CFSTR("Vox Virtual Mic");
+}
+
+static CFStringRef StreamName(void) {
+    return CFSTR("Vox Virtual Mic Input");
+}
+
+void *VoxVMicDriverFactory(CFAllocatorRef allocator, CFUUIDRef typeUUID) {
+    (void)allocator;
+    if (!CFEqual(typeUUID, kAudioServerPlugInTypeUUID)) {
+        return NULL;
+    }
+    return &gDriver;
+}
+
+static HRESULT STDMETHODCALLTYPE QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outInterface) {
+    if (outInterface == NULL) {
+        return E_POINTER;
+    }
+
+    if (UUIDEqual(inUUID, IUnknownUUID) || UUIDEqual(inUUID, kAudioServerPlugInDriverInterfaceUUID)) {
+        *outInterface = inDriver;
+        AddRef(inDriver);
+        return S_OK;
+    }
+
+    *outInterface = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE AddRef(void *inDriver) {
+    VirtualMicDriver *driver = (VirtualMicDriver *)inDriver;
+    driver->refCount += 1;
+    return driver->refCount;
+}
+
+static ULONG STDMETHODCALLTYPE Release(void *inDriver) {
+    VirtualMicDriver *driver = (VirtualMicDriver *)inDriver;
+    if (driver->refCount > 0) {
+        driver->refCount -= 1;
+    }
+    return driver->refCount;
+}
+
+static OSStatus STDMETHODCALLTYPE Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugInHostRef inHost) {
+    VirtualMicDriver *driver = Driver(inDriver);
+    driver->host = inHost;
+    driver->clockSeed = 1;
+    driver->startHostTime = mach_absolute_time();
+    return 0;
+}
+
+static OSStatus STDMETHODCALLTYPE CreateDevice(AudioServerPlugInDriverRef inDriver, CFDictionaryRef inDescription, const AudioServerPlugInClientInfo *inClientInfo, AudioObjectID *outDeviceObjectID) {
+    (void)inDriver;
+    (void)inDescription;
+    (void)inClientInfo;
+    (void)outDeviceObjectID;
+    return kAudioHardwareUnsupportedOperationError;
+}
+
+static OSStatus STDMETHODCALLTYPE DestroyDevice(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID) {
+    (void)inDriver;
+    (void)inDeviceObjectID;
+    return kAudioHardwareUnsupportedOperationError;
+}
+
+static OSStatus STDMETHODCALLTYPE AddDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo) {
+    (void)inDriver;
+    (void)inClientInfo;
+    return inDeviceObjectID == kObjectID_Device ? 0 : kAudioHardwareBadObjectError;
+}
+
+static OSStatus STDMETHODCALLTYPE RemoveDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo *inClientInfo) {
+    (void)inDriver;
+    (void)inClientInfo;
+    return inDeviceObjectID == kObjectID_Device ? 0 : kAudioHardwareBadObjectError;
+}
+
+static OSStatus STDMETHODCALLTYPE PerformDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo) {
+    (void)inDriver;
+    (void)inDeviceObjectID;
+    (void)inChangeAction;
+    (void)inChangeInfo;
+    return 0;
+}
+
+static OSStatus STDMETHODCALLTYPE AbortDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt64 inChangeAction, void *inChangeInfo) {
+    (void)inDriver;
+    (void)inDeviceObjectID;
+    (void)inChangeAction;
+    (void)inChangeInfo;
+    return 0;
+}
+
+static Boolean STDMETHODCALLTYPE HasProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress) {
+    (void)inDriver;
+    (void)inClientProcessID;
+
+    switch (inObjectID) {
+        case kAudioObjectPlugInObject:
+            switch (inAddress->mSelector) {
+                case kAudioObjectPropertyBaseClass:
+                case kAudioObjectPropertyClass:
+                case kAudioObjectPropertyOwner:
+                case kAudioObjectPropertyName:
+                case kAudioObjectPropertyManufacturer:
+                case kAudioObjectPropertyOwnedObjects:
+                case kAudioPlugInPropertyDeviceList:
+                case kAudioPlugInPropertyTranslateUIDToDevice:
+                    return true;
+                default:
+                    return false;
+            }
+
+        case kObjectID_Device:
+            switch (inAddress->mSelector) {
+                case kAudioObjectPropertyBaseClass:
+                case kAudioObjectPropertyClass:
+                case kAudioObjectPropertyOwner:
+                case kAudioObjectPropertyName:
+                case kAudioObjectPropertyManufacturer:
+                case kAudioObjectPropertyOwnedObjects:
+                case kAudioDevicePropertyDeviceUID:
+                case kAudioDevicePropertyModelUID:
+                case kAudioDevicePropertyTransportType:
+                case kAudioDevicePropertyDeviceIsAlive:
+                case kAudioDevicePropertyDeviceIsRunning:
+                case kAudioDevicePropertyStreams:
+                case kAudioDevicePropertyStreamConfiguration:
+                case kAudioDevicePropertyNominalSampleRate:
+                case kAudioDevicePropertyAvailableNominalSampleRates:
+                case kAudioDevicePropertyLatency:
+                case kAudioDevicePropertySafetyOffset:
+                    return true;
+                default:
+                    return false;
+            }
+
+        case kObjectID_Stream_Input:
+            switch (inAddress->mSelector) {
+                case kAudioObjectPropertyBaseClass:
+                case kAudioObjectPropertyClass:
+                case kAudioObjectPropertyOwner:
+                case kAudioObjectPropertyName:
+                case kAudioStreamPropertyDirection:
+                case kAudioStreamPropertyTerminalType:
+                case kAudioStreamPropertyStartingChannel:
+                case kAudioStreamPropertyLatency:
+                case kAudioStreamPropertyVirtualFormat:
+                case kAudioStreamPropertyPhysicalFormat:
+                case kAudioStreamPropertyAvailableVirtualFormats:
+                case kAudioStreamPropertyAvailablePhysicalFormats:
+                case kAudioStreamPropertyIsActive:
+                    return true;
+                default:
+                    return false;
+            }
+
+        default:
+            return false;
+    }
+}
+
+static OSStatus STDMETHODCALLTYPE IsPropertySettable(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, Boolean *outIsSettable) {
+    (void)inDriver;
+    (void)inObjectID;
+    (void)inClientProcessID;
+    (void)inAddress;
+    if (outIsSettable == NULL) {
+        return kAudioHardwareIllegalOperationError;
+    }
+    *outIsSettable = false;
+    return 0;
+}
+
+static OSStatus STDMETHODCALLTYPE GetPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 *outDataSize) {
+    (void)inDriver;
+    (void)inClientProcessID;
+    (void)inQualifierDataSize;
+    (void)inQualifierData;
+    if (outDataSize == NULL) {
+        return kAudioHardwareIllegalOperationError;
+    }
+
+    switch (inObjectID) {
+        case kAudioObjectPlugInObject:
+            switch (inAddress->mSelector) {
+                case kAudioObjectPropertyBaseClass:
+                case kAudioObjectPropertyClass:
+                case kAudioObjectPropertyOwner:
+                    *outDataSize = sizeof(AudioClassID);
+                    return 0;
+                case kAudioObjectPropertyName:
+                case kAudioObjectPropertyManufacturer:
+                    *outDataSize = sizeof(CFStringRef);
+                    return 0;
+                case kAudioObjectPropertyOwnedObjects:
+                case kAudioPlugInPropertyDeviceList:
+                case kAudioPlugInPropertyTranslateUIDToDevice:
+                    *outDataSize = sizeof(AudioObjectID);
+                    return 0;
+                default:
+                    return kAudioHardwareUnknownPropertyError;
+            }
+
+        case kObjectID_Device:
+            switch (inAddress->mSelector) {
+                case kAudioObjectPropertyBaseClass:
+                case kAudioObjectPropertyClass:
+                case kAudioObjectPropertyOwner:
+                case kAudioDevicePropertyTransportType:
+                case kAudioDevicePropertyDeviceIsAlive:
+                case kAudioDevicePropertyDeviceIsRunning:
+                case kAudioDevicePropertyLatency:
+                case kAudioDevicePropertySafetyOffset:
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioObjectPropertyName:
+                case kAudioObjectPropertyManufacturer:
+                case kAudioDevicePropertyDeviceUID:
+                case kAudioDevicePropertyModelUID:
+                    *outDataSize = sizeof(CFStringRef);
+                    return 0;
+                case kAudioObjectPropertyOwnedObjects:
+                case kAudioDevicePropertyStreams:
+                    *outDataSize = sizeof(AudioObjectID);
+                    return 0;
+                case kAudioDevicePropertyNominalSampleRate:
+                    *outDataSize = sizeof(Float64);
+                    return 0;
+                case kAudioDevicePropertyAvailableNominalSampleRates:
+                    *outDataSize = sizeof(AudioValueRange);
+                    return 0;
+                case kAudioDevicePropertyStreamConfiguration:
+                    *outDataSize = offsetof(AudioBufferList, mBuffers) + sizeof(AudioBuffer);
+                    return 0;
+                default:
+                    return kAudioHardwareUnknownPropertyError;
+            }
+
+        case kObjectID_Stream_Input:
+            switch (inAddress->mSelector) {
+                case kAudioObjectPropertyBaseClass:
+                case kAudioObjectPropertyClass:
+                case kAudioObjectPropertyOwner:
+                case kAudioStreamPropertyDirection:
+                case kAudioStreamPropertyTerminalType:
+                case kAudioStreamPropertyStartingChannel:
+                case kAudioStreamPropertyLatency:
+                case kAudioStreamPropertyIsActive:
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioObjectPropertyName:
+                    *outDataSize = sizeof(CFStringRef);
+                    return 0;
+                case kAudioStreamPropertyVirtualFormat:
+                case kAudioStreamPropertyPhysicalFormat:
+                    *outDataSize = sizeof(AudioStreamBasicDescription);
+                    return 0;
+                case kAudioStreamPropertyAvailableVirtualFormats:
+                case kAudioStreamPropertyAvailablePhysicalFormats:
+                    *outDataSize = sizeof(AudioStreamRangedDescription);
+                    return 0;
+                default:
+                    return kAudioHardwareUnknownPropertyError;
+            }
+
+        default:
+            return kAudioHardwareBadObjectError;
+    }
+}
+
+static OSStatus STDMETHODCALLTYPE GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, UInt32 *outDataSize, void *outData) {
+    (void)inDriver;
+    (void)inClientProcessID;
+    if (outDataSize == NULL || outData == NULL) {
+        return kAudioHardwareIllegalOperationError;
+    }
+
+    switch (inObjectID) {
+        case kAudioObjectPlugInObject:
+            switch (inAddress->mSelector) {
+                case kAudioObjectPropertyBaseClass:
+                    *((AudioClassID *)outData) = kAudioObjectClassID;
+                    *outDataSize = sizeof(AudioClassID);
+                    return 0;
+                case kAudioObjectPropertyClass:
+                    *((AudioClassID *)outData) = kAudioPlugInClassID;
+                    *outDataSize = sizeof(AudioClassID);
+                    return 0;
+                case kAudioObjectPropertyOwner:
+                    *((AudioObjectID *)outData) = kAudioObjectUnknown;
+                    *outDataSize = sizeof(AudioObjectID);
+                    return 0;
+                case kAudioObjectPropertyName:
+                    return WriteCFString(CFSTR("Vox Virtual Mic Plug-In"), inDataSize, outDataSize, outData);
+                case kAudioObjectPropertyManufacturer:
+                    return WriteCFString(ManufacturerName(), inDataSize, outDataSize, outData);
+                case kAudioObjectPropertyOwnedObjects:
+                case kAudioPlugInPropertyDeviceList:
+                    return WriteObjectID(kObjectID_Device, inDataSize, outDataSize, outData);
+                case kAudioPlugInPropertyTranslateUIDToDevice:
+                    if (inQualifierDataSize == sizeof(CFStringRef) && inQualifierData != NULL) {
+                        CFStringRef requested = *((CFStringRef const *)inQualifierData);
+                        AudioObjectID value = CFEqual(requested, DeviceUID()) ? kObjectID_Device : kAudioObjectUnknown;
+                        return WriteObjectID(value, inDataSize, outDataSize, outData);
+                    }
+                    return kAudioHardwareBadPropertySizeError;
+                default:
+                    return kAudioHardwareUnknownPropertyError;
+            }
+
+        case kObjectID_Device:
+            switch (inAddress->mSelector) {
+                case kAudioObjectPropertyBaseClass:
+                    *((AudioClassID *)outData) = kAudioObjectClassID;
+                    *outDataSize = sizeof(AudioClassID);
+                    return 0;
+                case kAudioObjectPropertyClass:
+                    *((AudioClassID *)outData) = kAudioDeviceClassID;
+                    *outDataSize = sizeof(AudioClassID);
+                    return 0;
+                case kAudioObjectPropertyOwner:
+                    *((AudioObjectID *)outData) = kAudioObjectPlugInObject;
+                    *outDataSize = sizeof(AudioObjectID);
+                    return 0;
+                case kAudioObjectPropertyName:
+                    return WriteCFString(DeviceName(), inDataSize, outDataSize, outData);
+                case kAudioObjectPropertyManufacturer:
+                    return WriteCFString(ManufacturerName(), inDataSize, outDataSize, outData);
+                case kAudioObjectPropertyOwnedObjects:
+                case kAudioDevicePropertyStreams:
+                    if (inAddress->mSelector == kAudioDevicePropertyStreams && inAddress->mScope != kAudioObjectPropertyScopeInput) {
+                        *outDataSize = 0;
+                        return 0;
+                    }
+                    return WriteObjectID(kObjectID_Stream_Input, inDataSize, outDataSize, outData);
+                case kAudioDevicePropertyDeviceUID:
+                case kAudioDevicePropertyModelUID:
+                    return WriteCFString(DeviceUID(), inDataSize, outDataSize, outData);
+                case kAudioDevicePropertyTransportType:
+                    *((UInt32 *)outData) = kAudioDeviceTransportTypeVirtual;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioDevicePropertyDeviceIsAlive:
+                    *((UInt32 *)outData) = 1;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioDevicePropertyDeviceIsRunning:
+                    *((UInt32 *)outData) = Driver(inDriver)->activeIOCount > 0 ? 1 : 0;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioDevicePropertyNominalSampleRate:
+                    *((Float64 *)outData) = VMIC_DEFAULT_SAMPLE_RATE;
+                    *outDataSize = sizeof(Float64);
+                    return 0;
+                case kAudioDevicePropertyAvailableNominalSampleRates: {
+                    AudioValueRange range = {.mMinimum = VMIC_DEFAULT_SAMPLE_RATE, .mMaximum = VMIC_DEFAULT_SAMPLE_RATE};
+                    if (inDataSize < sizeof(range)) {
+                        return kAudioHardwareBadPropertySizeError;
+                    }
+                    *((AudioValueRange *)outData) = range;
+                    *outDataSize = sizeof(range);
+                    return 0;
+                }
+                case kAudioDevicePropertyStreamConfiguration: {
+                    UInt32 size = offsetof(AudioBufferList, mBuffers) + sizeof(AudioBuffer);
+                    if (inDataSize < size) {
+                        return kAudioHardwareBadPropertySizeError;
+                    }
+                    AudioBufferList *abl = (AudioBufferList *)outData;
+                    abl->mNumberBuffers = 1;
+                    abl->mBuffers[0].mNumberChannels = kVirtualMicChannelCount;
+                    abl->mBuffers[0].mDataByteSize = 0;
+                    abl->mBuffers[0].mData = NULL;
+                    *outDataSize = size;
+                    return 0;
+                }
+                case kAudioDevicePropertyLatency:
+                case kAudioDevicePropertySafetyOffset:
+                    *((UInt32 *)outData) = 0;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                default:
+                    return kAudioHardwareUnknownPropertyError;
+            }
+
+        case kObjectID_Stream_Input:
+            switch (inAddress->mSelector) {
+                case kAudioObjectPropertyBaseClass:
+                    *((AudioClassID *)outData) = kAudioObjectClassID;
+                    *outDataSize = sizeof(AudioClassID);
+                    return 0;
+                case kAudioObjectPropertyClass:
+                    *((AudioClassID *)outData) = kAudioStreamClassID;
+                    *outDataSize = sizeof(AudioClassID);
+                    return 0;
+                case kAudioObjectPropertyOwner:
+                    *((AudioObjectID *)outData) = kObjectID_Device;
+                    *outDataSize = sizeof(AudioObjectID);
+                    return 0;
+                case kAudioObjectPropertyName:
+                    return WriteCFString(StreamName(), inDataSize, outDataSize, outData);
+                case kAudioStreamPropertyDirection:
+                    *((UInt32 *)outData) = 1;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioStreamPropertyTerminalType:
+                    *((UInt32 *)outData) = kAudioStreamTerminalTypeMicrophone;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioStreamPropertyStartingChannel:
+                    *((UInt32 *)outData) = 1;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioStreamPropertyLatency:
+                    *((UInt32 *)outData) = 0;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                case kAudioStreamPropertyVirtualFormat:
+                case kAudioStreamPropertyPhysicalFormat: {
+                    AudioStreamBasicDescription asbd = VirtualMicFormat();
+                    if (inDataSize < sizeof(asbd)) {
+                        return kAudioHardwareBadPropertySizeError;
+                    }
+                    *((AudioStreamBasicDescription *)outData) = asbd;
+                    *outDataSize = sizeof(asbd);
+                    return 0;
+                }
+                case kAudioStreamPropertyAvailableVirtualFormats:
+                case kAudioStreamPropertyAvailablePhysicalFormats: {
+                    AudioStreamRangedDescription ranged = VirtualMicRangedFormat();
+                    if (inDataSize < sizeof(ranged)) {
+                        return kAudioHardwareBadPropertySizeError;
+                    }
+                    *((AudioStreamRangedDescription *)outData) = ranged;
+                    *outDataSize = sizeof(ranged);
+                    return 0;
+                }
+                case kAudioStreamPropertyIsActive:
+                    *((UInt32 *)outData) = 1;
+                    *outDataSize = sizeof(UInt32);
+                    return 0;
+                default:
+                    return kAudioHardwareUnknownPropertyError;
+            }
+
+        default:
+            return kAudioHardwareBadObjectError;
+    }
+}
+
+static OSStatus STDMETHODCALLTYPE SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID inObjectID, pid_t inClientProcessID, const AudioObjectPropertyAddress *inAddress, UInt32 inQualifierDataSize, const void *inQualifierData, UInt32 inDataSize, const void *inData) {
+    (void)inDriver;
+    (void)inObjectID;
+    (void)inClientProcessID;
+    (void)inAddress;
+    (void)inQualifierDataSize;
+    (void)inQualifierData;
+    (void)inDataSize;
+    (void)inData;
+    return kAudioHardwareUnsupportedOperationError;
+}
+
+static OSStatus STDMETHODCALLTYPE StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID) {
+    (void)inClientID;
+    if (inDeviceObjectID != kObjectID_Device) {
+        return kAudioHardwareBadObjectError;
+    }
+
+    VirtualMicDriver *driver = Driver(inDriver);
+    if (driver->activeIOCount == 0) {
+        driver->startHostTime = mach_absolute_time();
+        driver->clockSeed += 1;
+        if (driver->reader == NULL) {
+            int err = 0;
+            driver->reader = vmic_reader_open(NULL, &err);
+            (void)err;
+        }
+    }
+    driver->activeIOCount += 1;
+    return 0;
+}
+
+static OSStatus STDMETHODCALLTYPE StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID) {
+    (void)inClientID;
+    if (inDeviceObjectID != kObjectID_Device) {
+        return kAudioHardwareBadObjectError;
+    }
+
+    VirtualMicDriver *driver = Driver(inDriver);
+    if (driver->activeIOCount > 0) {
+        driver->activeIOCount -= 1;
+    }
+    if (driver->activeIOCount == 0 && driver->reader != NULL) {
+        vmic_reader_close(driver->reader);
+        driver->reader = NULL;
+    }
+    return 0;
+}
+
+static OSStatus STDMETHODCALLTYPE GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, Float64 *outSampleTime, UInt64 *outHostTime, UInt64 *outSeed) {
+    (void)inClientID;
+    if (inDeviceObjectID != kObjectID_Device || outSampleTime == NULL || outHostTime == NULL || outSeed == NULL) {
+        return kAudioHardwareIllegalOperationError;
+    }
+
+    VirtualMicDriver *driver = Driver(inDriver);
+    uint64_t now = mach_absolute_time();
+    mach_timebase_info_data_t timebase;
+    mach_timebase_info(&timebase);
+
+    long double elapsedNano = 0.0;
+    if (now >= driver->startHostTime) {
+        elapsedNano = ((long double)(now - driver->startHostTime) * (long double)timebase.numer) / (long double)timebase.denom;
+    }
+
+    *outSampleTime = (Float64)(elapsedNano / 1000000000.0L * VMIC_DEFAULT_SAMPLE_RATE);
+    *outHostTime = now;
+    *outSeed = driver->clockSeed;
+    return 0;
+}
+
+static OSStatus STDMETHODCALLTYPE WillDoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, Boolean *outWillDo, Boolean *outWillDoInPlace) {
+    (void)inDriver;
+    (void)inClientID;
+    if (inDeviceObjectID != kObjectID_Device || outWillDo == NULL || outWillDoInPlace == NULL) {
+        return kAudioHardwareIllegalOperationError;
+    }
+    *outWillDo = (inOperationID == kAudioServerPlugInIOOperationReadInput);
+    *outWillDoInPlace = true;
+    return 0;
+}
+
+static OSStatus STDMETHODCALLTYPE BeginIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo) {
+    (void)inDriver;
+    (void)inDeviceObjectID;
+    (void)inClientID;
+    (void)inOperationID;
+    (void)inIOBufferFrameSize;
+    (void)inIOCycleInfo;
+    return 0;
+}
+
+static OSStatus STDMETHODCALLTYPE DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo, void *ioMainBuffer, void *ioSecondaryBuffer) {
+    (void)inClientID;
+    (void)inIOCycleInfo;
+    (void)ioSecondaryBuffer;
+
+    if (inDeviceObjectID != kObjectID_Device || inStreamObjectID != kObjectID_Stream_Input) {
+        return kAudioHardwareBadObjectError;
+    }
+    if (inOperationID != kAudioServerPlugInIOOperationReadInput || ioMainBuffer == NULL) {
+        return 0;
+    }
+
+    Float32 *buffer = (Float32 *)ioMainBuffer;
+    memset(buffer, 0, sizeof(Float32) * inIOBufferFrameSize);
+
+    VirtualMicDriver *driver = Driver(inDriver);
+    if (driver->reader == NULL) {
+        int err = 0;
+        driver->reader = vmic_reader_open(NULL, &err);
+        (void)err;
+    }
+
+    if (driver->reader != NULL) {
+        vmic_reader_dequeue(driver->reader, buffer, inIOBufferFrameSize);
+    }
+    return 0;
+}
+
+static OSStatus STDMETHODCALLTYPE EndIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo) {
+    (void)inDriver;
+    (void)inDeviceObjectID;
+    (void)inClientID;
+    (void)inOperationID;
+    (void)inIOBufferFrameSize;
+    (void)inIOCycleInfo;
+    return 0;
+}

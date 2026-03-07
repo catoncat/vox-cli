@@ -48,6 +48,8 @@ from .services.realtime_asr_service import run_realtime_session_server
 from .services.self_service import update_global_install
 from .services.model_service import ensure_model_downloaded, list_model_statuses, resolve_model
 from .services.tts_service import clone_to_file, custom_to_file, design_to_file
+from .services.vmic_service import build_driver as build_vmic_driver
+from .services.vmic_service import run_helper as run_vmic_helper
 
 console = Console()
 err_console = Console(stderr=True)
@@ -77,6 +79,7 @@ pipeline_app = typer.Typer(help='End-to-end pipelines')
 task_app = typer.Typer(help='Task inspection')
 config_app = typer.Typer(help='Config operations')
 self_app = typer.Typer(help='Self-management operations')
+vmic_app = typer.Typer(help='Virtual microphone operations')
 
 app.add_typer(model_app, name='model')
 app.add_typer(profile_app, name='profile')
@@ -86,6 +89,7 @@ app.add_typer(pipeline_app, name='pipeline')
 app.add_typer(task_app, name='task')
 app.add_typer(config_app, name='config')
 app.add_typer(self_app, name='self')
+app.add_typer(vmic_app, name='vmic')
 
 
 @app.callback()
@@ -194,6 +198,98 @@ def dictation_cmd(
 
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
+
+
+@vmic_app.command('path')
+def vmic_path_cmd(
+    rebuild_native: bool = typer.Option(False, '--rebuild-native'),
+    release: bool = typer.Option(True, '--release/--debug'),
+) -> None:
+    try:
+        output = run_vmic_helper(
+            ['path'],
+            rebuild_native=rebuild_native,
+            configuration='release' if release else 'debug',
+        )
+    except Exception as e:
+        _fail(str(e))
+    console.print(output)
+
+
+@vmic_app.command('status')
+def vmic_status_cmd(
+    rebuild_native: bool = typer.Option(False, '--rebuild-native'),
+    release: bool = typer.Option(True, '--release/--debug'),
+) -> None:
+    try:
+        output = run_vmic_helper(
+            ['status'],
+            rebuild_native=rebuild_native,
+            configuration='release' if release else 'debug',
+        )
+    except Exception as e:
+        _fail(str(e))
+    console.print(output)
+
+
+@vmic_app.command('clear')
+def vmic_clear_cmd(
+    rebuild_native: bool = typer.Option(False, '--rebuild-native'),
+    release: bool = typer.Option(True, '--release/--debug'),
+) -> None:
+    try:
+        output = run_vmic_helper(
+            ['clear'],
+            rebuild_native=rebuild_native,
+            configuration='release' if release else 'debug',
+        )
+    except Exception as e:
+        _fail(str(e))
+    console.print(output)
+
+
+@vmic_app.command('prime-sine')
+def vmic_prime_sine_cmd(
+    seconds: float = typer.Option(2.0, '--seconds', min=0.1),
+    frequency: float = typer.Option(440.0, '--frequency', min=1.0),
+    rebuild_native: bool = typer.Option(False, '--rebuild-native'),
+    release: bool = typer.Option(True, '--release/--debug'),
+) -> None:
+    try:
+        output = run_vmic_helper(
+            ['prime-sine', '--seconds', str(seconds), '--frequency', str(frequency)],
+            rebuild_native=rebuild_native,
+            configuration='release' if release else 'debug',
+        )
+    except Exception as e:
+        _fail(str(e))
+    console.print(output)
+
+
+@vmic_app.command('enqueue')
+def vmic_enqueue_cmd(
+    audio: Path = typer.Option(..., '--audio', exists=True, file_okay=True, dir_okay=False, readable=True),
+    rebuild_native: bool = typer.Option(False, '--rebuild-native'),
+    release: bool = typer.Option(True, '--release/--debug'),
+) -> None:
+    try:
+        output = run_vmic_helper(
+            ['enqueue', str(audio)],
+            rebuild_native=rebuild_native,
+            configuration='release' if release else 'debug',
+        )
+    except Exception as e:
+        _fail(str(e))
+    console.print(output)
+
+
+@vmic_app.command('build-driver')
+def vmic_build_driver_cmd() -> None:
+    try:
+        bundle_path = build_vmic_driver()
+    except Exception as e:
+        _fail(str(e))
+    console.print(str(bundle_path))
 
 
 @self_app.command('update')
