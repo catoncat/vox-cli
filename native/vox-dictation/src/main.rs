@@ -18,7 +18,7 @@ use objc2_app_kit::{
     NSTextField, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
     NSWindowStyleMask, NSWorkspace,
 };
-use objc2_avf_audio::{AVAudioEngine, AVAudioPCMBuffer, AVAudioTime};
+use objc2_avf_audio::{AVAudioCommonFormat, AVAudioEngine, AVAudioPCMBuffer, AVAudioTime};
 use objc2_core_foundation::{kCFRunLoopCommonModes, CFMachPort, CFRunLoop};
 use objc2_core_graphics::{
     CGEvent, CGEventFlags, CGEventMask, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
@@ -85,6 +85,8 @@ static LAST_FLUSH_UTTERANCE_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_FINAL_UTTERANCE_ID: AtomicU64 = AtomicU64::new(0);
 static SYNTHETIC_INPUT_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 static SUBTITLE_UPDATE_SEQ: AtomicU64 = AtomicU64::new(0);
+static AUDIO_CALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
+static AUDIO_UNSUPPORTED_BUFFER_COUNT: AtomicU64 = AtomicU64::new(0);
 static LAST_TYPED_PARTIAL: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
 static mut CONTROLLER: *mut Controller = std::ptr::null_mut();
 
@@ -363,6 +365,8 @@ impl Controller {
         IS_RECORDING.store(true, Ordering::SeqCst);
         VOICE_STARTED.store(false, Ordering::SeqCst);
         SENT_SAMPLES.store(0, Ordering::SeqCst);
+        AUDIO_CALLBACK_COUNT.store(0, Ordering::SeqCst);
+        AUDIO_UNSUPPORTED_BUFFER_COUNT.store(0, Ordering::SeqCst);
         LAST_SPEECH_MS.store(now_millis(), Ordering::SeqCst);
         LAST_RECORDING_STARTED_MS.store(now_millis(), Ordering::SeqCst);
         clear_partial_typing_state();
@@ -388,81 +392,110 @@ impl Controller {
             return;
         }
 
+        if unsafe { self.audio_engine.isRunning() } {
+            verbose_log!("[vox-dictation] audio engine still running before start; forcing reset");
+            unsafe {
+                self.audio_engine.stop();
+                self.audio_engine.reset();
+            }
+        }
+
         let microphone = unsafe { self.audio_engine.inputNode() };
         let backend_audio_tx = self.backend_tx.clone();
         let native_format = unsafe { microphone.outputFormatForBus(0) };
         let native_sample_rate = unsafe { native_format.sampleRate() as u32 };
+        let native_common_format = unsafe { native_format.commonFormat() };
+        let native_channels = unsafe { native_format.channelCount() };
+        let native_interleaved = unsafe { native_format.isInterleaved() };
         let preroll_limit = (TARGET_SAMPLE_RATE as usize * PRE_SPEECH_ROLL_MS as usize) / 1000;
         let preroll_buffer = std::sync::Mutex::new(VecDeque::<i16>::with_capacity(preroll_limit));
         verbose_log!(
-            "[vox-dictation] native sample rate: {}Hz",
-            native_sample_rate
+            "[vox-dictation] native sample rate: {}Hz format={} channels={} interleaved={}",
+            native_sample_rate,
+            audio_common_format_name(native_common_format),
+            native_channels,
+            native_interleaved
         );
         let tap_block = RcBlock::new(
             move |buffer: NonNull<AVAudioPCMBuffer>, _time: NonNull<AVAudioTime>| {
                 if !IS_RECORDING.load(Ordering::SeqCst) {
                     return;
                 }
+                AUDIO_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
                 let buffer = unsafe { buffer.as_ref() };
-                let frames = unsafe { buffer.frameLength() as usize };
-                if let Some(ch0) = unsafe { buffer.floatChannelData().as_ref() } {
-                    let ptr = ch0.as_ptr();
-                    let slice = unsafe { std::slice::from_raw_parts(ptr, frames) };
-                    let resampled =
-                        resample_linear(slice, native_sample_rate, TARGET_SAMPLE_RATE as u32);
-                    let (peak, rms) = audio_levels(&resampled);
-                    let is_speech = peak >= SPEECH_PEAK_THRESHOLD || rms >= SPEECH_RMS_THRESHOLD;
-                    let now = now_millis();
-                    let pcm = float_to_i16(&resampled);
-                    let voice_started = VOICE_STARTED.load(Ordering::SeqCst);
+                let Some(samples) = pcm_buffer_to_mono_f32(buffer) else {
+                    let unsupported_count =
+                        AUDIO_UNSUPPORTED_BUFFER_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+                    if unsupported_count == 1 {
+                        let format = unsafe { buffer.format() };
+                        let common = unsafe { format.commonFormat() };
+                        let channels = unsafe { format.channelCount() };
+                        let interleaved = unsafe { format.isInterleaved() };
+                        let stride = unsafe { buffer.stride() };
+                        eprintln!(
+                            "[vox-dictation] unsupported input buffer format={} channels={} interleaved={} stride={}",
+                            audio_common_format_name(common),
+                            channels,
+                            interleaved,
+                            stride
+                        );
+                    }
+                    return;
+                };
+                let resampled =
+                    resample_linear(&samples, native_sample_rate, TARGET_SAMPLE_RATE as u32);
+                let (peak, rms) = audio_levels(&resampled);
+                let is_speech = peak >= SPEECH_PEAK_THRESHOLD || rms >= SPEECH_RMS_THRESHOLD;
+                let now = now_millis();
+                let pcm = float_to_i16(&resampled);
+                let voice_started = VOICE_STARTED.load(Ordering::SeqCst);
 
-                    if !voice_started {
-                        let mut preroll = preroll_buffer.lock().expect("preroll mutex poisoned");
-                        preroll.extend(pcm.iter().copied());
-                        while preroll.len() > preroll_limit {
-                            let _ = preroll.pop_front();
-                        }
-
-                        if is_speech {
-                            VOICE_STARTED.store(true, Ordering::SeqCst);
-                            LAST_SPEECH_MS.store(now, Ordering::SeqCst);
-                            let initial_pcm: Vec<i16> = preroll.drain(..).collect();
-                            let initial_len = initial_pcm.len();
-                            drop(preroll);
-                            verbose_log!(
-                                "[vox-dictation] voice detected; sending preroll_ms={} peak={:.4} rms={:.4}",
-                                (initial_len as u64 * 1000) / TARGET_SAMPLE_RATE as u64,
-                                peak,
-                                rms
-                            );
-                            if queue_backend_command(
-                                &backend_audio_tx,
-                                BackendCommand::Audio(initial_pcm),
-                                "audio_preroll",
-                            ) {
-                                SENT_SAMPLES.fetch_add(initial_len, Ordering::SeqCst);
-                            }
-                        }
-                        return;
+                if !voice_started {
+                    let mut preroll = preroll_buffer.lock().expect("preroll mutex poisoned");
+                    preroll.extend(pcm.iter().copied());
+                    while preroll.len() > preroll_limit {
+                        let _ = preroll.pop_front();
                     }
 
                     if is_speech {
+                        VOICE_STARTED.store(true, Ordering::SeqCst);
                         LAST_SPEECH_MS.store(now, Ordering::SeqCst);
-                    }
-
-                    let in_hangover = voice_started
-                        && now.saturating_sub(LAST_SPEECH_MS.load(Ordering::SeqCst))
-                            <= SPEECH_HANGOVER_MS;
-
-                    if voice_started && (is_speech || in_hangover) {
-                        let pcm_len = pcm.len();
+                        let initial_pcm: Vec<i16> = preroll.drain(..).collect();
+                        let initial_len = initial_pcm.len();
+                        drop(preroll);
+                        verbose_log!(
+                            "[vox-dictation] voice detected; sending preroll_ms={} peak={:.4} rms={:.4}",
+                            (initial_len as u64 * 1000) / TARGET_SAMPLE_RATE as u64,
+                            peak,
+                            rms
+                        );
                         if queue_backend_command(
                             &backend_audio_tx,
-                            BackendCommand::Audio(pcm),
-                            "audio_chunk",
+                            BackendCommand::Audio(initial_pcm),
+                            "audio_preroll",
                         ) {
-                            SENT_SAMPLES.fetch_add(pcm_len, Ordering::SeqCst);
+                            SENT_SAMPLES.fetch_add(initial_len, Ordering::SeqCst);
                         }
+                    }
+                    return;
+                }
+
+                if is_speech {
+                    LAST_SPEECH_MS.store(now, Ordering::SeqCst);
+                }
+
+                let in_hangover = voice_started
+                    && now.saturating_sub(LAST_SPEECH_MS.load(Ordering::SeqCst))
+                        <= SPEECH_HANGOVER_MS;
+
+                if voice_started && (is_speech || in_hangover) {
+                    let pcm_len = pcm.len();
+                    if queue_backend_command(
+                        &backend_audio_tx,
+                        BackendCommand::Audio(pcm),
+                        "audio_chunk",
+                    ) {
+                        SENT_SAMPLES.fetch_add(pcm_len, Ordering::SeqCst);
                     }
                 }
             },
@@ -506,6 +539,7 @@ impl Controller {
         let microphone = unsafe { self.audio_engine.inputNode() };
         unsafe { microphone.removeTapOnBus(0) };
         unsafe { self.audio_engine.stop() };
+        unsafe { self.audio_engine.reset() };
 
         if !flush_result {
             clear_partial_typing_state();
@@ -515,17 +549,29 @@ impl Controller {
         }
 
         let sent_samples = SENT_SAMPLES.load(Ordering::SeqCst);
+        let audio_callbacks = AUDIO_CALLBACK_COUNT.load(Ordering::SeqCst);
+        let unsupported_buffers = AUDIO_UNSUPPORTED_BUFFER_COUNT.load(Ordering::SeqCst);
         let min_samples = (TARGET_SAMPLE_RATE as usize * MIN_UTTERANCE_MS as usize) / 1000;
         let voice_started = VOICE_STARTED.load(Ordering::SeqCst);
         verbose_log!(
-            "[vox-dictation] finish_recording flush_result={} voice_started={} sent_samples={} min_samples={}",
+            "[vox-dictation] finish_recording flush_result={} voice_started={} sent_samples={} callbacks={} unsupported_buffers={} min_samples={}",
             flush_result,
             voice_started,
             sent_samples,
+            audio_callbacks,
+            unsupported_buffers,
             min_samples
         );
 
         if !voice_started || sent_samples < min_samples {
+            if audio_callbacks == 0 {
+                eprintln!("[vox-dictation] no audio callbacks received from AVAudioEngine");
+            } else if unsupported_buffers > 0 {
+                eprintln!(
+                    "[vox-dictation] dropped {} audio buffers due to unsupported input format",
+                    unsupported_buffers
+                );
+            }
             eprintln!("[vox-dictation] discarded short/quiet utterance");
             clear_partial_typing_state();
             dispatch_subtitle_hide();
@@ -676,6 +722,83 @@ fn clear_partial_typing_state() {
         .lock()
         .expect("partial typing mutex poisoned");
     state.clear();
+}
+
+fn audio_common_format_name(format: AVAudioCommonFormat) -> &'static str {
+    match format {
+        AVAudioCommonFormat::PCMFormatFloat32 => "float32",
+        AVAudioCommonFormat::PCMFormatFloat64 => "float64",
+        AVAudioCommonFormat::PCMFormatInt16 => "int16",
+        AVAudioCommonFormat::PCMFormatInt32 => "int32",
+        _ => "other",
+    }
+}
+
+fn sample_vector_from_ptr<T: Copy>(
+    ptr: *const T,
+    frames: usize,
+    stride: usize,
+    normalize: impl Fn(T) -> f32,
+) -> Vec<f32> {
+    let mut samples = Vec::with_capacity(frames);
+    for i in 0..frames {
+        let sample = unsafe { *ptr.add(i.saturating_mul(stride)) };
+        samples.push(normalize(sample));
+    }
+    samples
+}
+
+fn pcm_buffer_to_mono_f32(buffer: &AVAudioPCMBuffer) -> Option<Vec<f32>> {
+    let frames = unsafe { buffer.frameLength() as usize };
+    if frames == 0 {
+        return Some(Vec::new());
+    }
+    let stride = (unsafe { buffer.stride() as usize }).max(1);
+    let format = unsafe { buffer.format() };
+    let common = unsafe { format.commonFormat() };
+
+    match common {
+        AVAudioCommonFormat::PCMFormatFloat32 => {
+            let channels = unsafe { buffer.floatChannelData() };
+            if channels.is_null() {
+                return None;
+            }
+            let ch0 = unsafe { *channels };
+            Some(sample_vector_from_ptr(
+                ch0.as_ptr(),
+                frames,
+                stride,
+                |sample| sample,
+            ))
+        }
+        AVAudioCommonFormat::PCMFormatInt16 => {
+            let channels = unsafe { buffer.int16ChannelData() };
+            if channels.is_null() {
+                return None;
+            }
+            let ch0 = unsafe { *channels };
+            Some(sample_vector_from_ptr(
+                ch0.as_ptr(),
+                frames,
+                stride,
+                |sample| sample as f32 / i16::MAX as f32,
+            ))
+        }
+        AVAudioCommonFormat::PCMFormatInt32 => {
+            let channels = unsafe { buffer.int32ChannelData() };
+            if channels.is_null() {
+                return None;
+            }
+            let ch0 = unsafe { *channels };
+            Some(sample_vector_from_ptr(
+                ch0.as_ptr(),
+                frames,
+                stride,
+                |sample| sample as f32 / i32::MAX as f32,
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn subtitle_text_units(text: &str) -> f64 {
