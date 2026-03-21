@@ -13,10 +13,10 @@ use objc2::runtime::{AnyObject, NSObject};
 use objc2::{define_class, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSAutoresizingMaskOptions, NSBackingStoreType,
-    NSColor, NSFont, NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSLineBreakMode,
-    NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSStatusItem, NSStatusWindowLevel,
-    NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowAnimationBehavior,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSColor, NSFont, NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSLineBreakMode, NSMenu,
+    NSMenuItem, NSScreen, NSStatusBar, NSStatusItem, NSStatusWindowLevel, NSTextAlignment,
+    NSTextField, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
+    NSWindowStyleMask, NSWorkspace,
 };
 use objc2_avf_audio::{AVAudioEngine, AVAudioPCMBuffer, AVAudioTime};
 use objc2_core_foundation::{kCFRunLoopCommonModes, CFMachPort, CFRunLoop};
@@ -52,15 +52,19 @@ const SYNTHETIC_INPUT_GRACE_MS: u64 = 250;
 const SUBTITLE_HIDE_DELAY_MS: u64 = 420;
 const FLUSH_WATCHDOG_TIMEOUT_MS: u64 = 12_000;
 const SUBTITLE_BOTTOM_MARGIN: f64 = 36.0;
-const SUBTITLE_WIDTH_RATIO: f64 = 0.68;
-const SUBTITLE_MIN_WIDTH: f64 = 180.0;
-const SUBTITLE_MAX_WIDTH: f64 = 1_040.0;
-const SUBTITLE_MIN_HEIGHT: f64 = 58.0;
-const SUBTITLE_MAX_HEIGHT: f64 = 188.0;
-const SUBTITLE_HORIZONTAL_PADDING: f64 = 18.0;
-const SUBTITLE_VERTICAL_PADDING: f64 = 12.0;
-const SUBTITLE_LINE_HEIGHT: f64 = 34.0;
+const SUBTITLE_WIDTH_RATIO: f64 = 0.74;
+const SUBTITLE_MIN_WIDTH: f64 = 220.0;
+const SUBTITLE_MAX_WIDTH: f64 = 1_160.0;
+const SUBTITLE_MIN_HEIGHT: f64 = 60.0;
+const SUBTITLE_MAX_HEIGHT: f64 = 220.0;
+const SUBTITLE_HORIZONTAL_PADDING: f64 = 20.0;
+const SUBTITLE_VERTICAL_PADDING: f64 = 14.0;
+const SUBTITLE_LINE_HEIGHT: f64 = 36.0;
 const SUBTITLE_FONT_SIZE: f64 = 29.0;
+const SUBTITLE_FALLBACK_FILL_ALPHA: f64 = 0.82;
+const SUBTITLE_FALLBACK_BORDER_ALPHA: f64 = 0.34;
+const SUBTITLE_FALLBACK_SHADOW_ALPHA: f32 = 0.16;
+const SUBTITLE_FALLBACK_SHADOW_RADIUS: f64 = 18.0;
 
 static BACKEND_READY: AtomicBool = AtomicBool::new(false);
 static IS_RECORDING: AtomicBool = AtomicBool::new(false);
@@ -220,19 +224,17 @@ impl SubtitleOverlay {
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
-        glass.setStyle(NSGlassEffectViewStyle::Clear);
-        glass.setCornerRadius(26.0);
-        let tint = NSColor::colorWithCalibratedWhite_alpha(1.0, 0.06);
-        glass.setTintColor(Some(&tint));
+        glass.setStyle(NSGlassEffectViewStyle::Regular);
+        glass.setCornerRadius(subtitle_corner_radius(frame));
 
         let content = NSView::initWithFrame(NSView::alloc(mtm), subtitle_content_frame(frame));
         content.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
+        content.setWantsLayer(true);
 
         let label = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
-        let foreground = NSColor::colorWithCalibratedWhite_alpha(1.0, 0.97);
         let font = NSFont::boldSystemFontOfSize(SUBTITLE_FONT_SIZE);
         label.setFrame(subtitle_label_frame(frame));
         label.setAutoresizingMask(
@@ -241,8 +243,8 @@ impl SubtitleOverlay {
         );
         label.setAlignment(NSTextAlignment::Center);
         label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
-        label.setMaximumNumberOfLines(4);
-        label.setAllowsDefaultTighteningForTruncation(true);
+        label.setMaximumNumberOfLines(5);
+        label.setAllowsDefaultTighteningForTruncation(false);
         label.setUsesSingleLineMode(false);
         label.setBordered(false);
         label.setBezeled(false);
@@ -250,7 +252,6 @@ impl SubtitleOverlay {
         label.setSelectable(false);
         label.setDrawsBackground(false);
         label.setBackgroundColor(Some(&transparent));
-        label.setTextColor(Some(&foreground));
         label.setFont(Some(&font));
 
         content.addSubview(&label);
@@ -258,12 +259,14 @@ impl SubtitleOverlay {
         window.setContentView(Some(&glass));
         window.orderOut(None);
 
-        Self {
+        let overlay = Self {
             window,
             glass,
             content,
             label,
-        }
+        };
+        overlay.apply_visual_style(frame);
+        overlay
     }
 
     fn show_text(&self, mtm: MainThreadMarker, text: &str) {
@@ -274,9 +277,7 @@ impl SubtitleOverlay {
         }
         let frame = subtitle_window_frame(mtm, normalized);
         self.window.setFrame_display(frame, false);
-        self.glass.setFrame(subtitle_content_frame(frame));
-        self.content.setFrame(subtitle_content_frame(frame));
-        self.label.setFrame(subtitle_label_frame(frame));
+        self.apply_visual_style(frame);
         self.label.setStringValue(&NSString::from_str(normalized));
         self.window.orderFrontRegardless();
         self.window.displayIfNeeded();
@@ -284,6 +285,55 @@ impl SubtitleOverlay {
 
     fn hide(&self) {
         self.window.orderOut(None);
+    }
+
+    fn apply_visual_style(&self, frame: NSRect) {
+        let radius = subtitle_corner_radius(frame);
+        self.glass.setFrame(subtitle_content_frame(frame));
+        self.glass.setCornerRadius(radius);
+        self.content.setFrame(subtitle_content_frame(frame));
+        self.label.setFrame(subtitle_label_frame(frame));
+
+        if subtitle_should_reduce_transparency() {
+            self.glass.setAlphaValue(0.0);
+            let foreground = NSColor::colorWithCalibratedWhite_alpha(0.08, 0.96);
+            self.label.setTextColor(Some(&foreground));
+            let fill = NSColor::colorWithCalibratedWhite_alpha(0.98, SUBTITLE_FALLBACK_FILL_ALPHA);
+            let border =
+                NSColor::colorWithCalibratedWhite_alpha(1.0, SUBTITLE_FALLBACK_BORDER_ALPHA);
+            let shadow = NSColor::colorWithCalibratedWhite_alpha(0.0, 0.8);
+            if let Some(layer) = self.content.layer() {
+                let fill_cg = fill.CGColor();
+                let border_cg = border.CGColor();
+                let shadow_cg = shadow.CGColor();
+                layer.setMasksToBounds(false);
+                layer.setBackgroundColor(Some(&fill_cg));
+                layer.setCornerRadius(radius);
+                layer.setBorderWidth(1.0);
+                layer.setBorderColor(Some(&border_cg));
+                layer.setShadowColor(Some(&shadow_cg));
+                layer.setShadowOpacity(SUBTITLE_FALLBACK_SHADOW_ALPHA);
+                layer.setShadowRadius(SUBTITLE_FALLBACK_SHADOW_RADIUS);
+            }
+            return;
+        }
+
+        self.glass.setAlphaValue(1.0);
+        let tint = NSColor::colorWithCalibratedWhite_alpha(1.0, 0.07);
+        self.glass.setTintColor(Some(&tint));
+        let foreground = NSColor::colorWithCalibratedWhite_alpha(1.0, 0.97);
+        self.label.setTextColor(Some(&foreground));
+        if let Some(layer) = self.content.layer() {
+            let clear = NSColor::clearColor().CGColor();
+            layer.setMasksToBounds(false);
+            layer.setBackgroundColor(Some(&clear));
+            layer.setCornerRadius(radius);
+            layer.setBorderWidth(0.0);
+            layer.setBorderColor(None);
+            layer.setShadowColor(None);
+            layer.setShadowOpacity(0.0);
+            layer.setShadowRadius(0.0);
+        }
     }
 }
 
@@ -481,9 +531,7 @@ impl Controller {
             dispatch_subtitle_hide();
             let _ = queue_backend_command(&self.backend_tx, BackendCommand::Reset, "reset");
         } else {
-            if SHOW_SUBTITLE_OVERLAY.load(Ordering::SeqCst)
-                || TYPE_PARTIAL.load(Ordering::SeqCst)
-            {
+            if SHOW_SUBTITLE_OVERLAY.load(Ordering::SeqCst) || TYPE_PARTIAL.load(Ordering::SeqCst) {
                 let _ = queue_backend_command(
                     &self.backend_tx,
                     BackendCommand::Partial,
@@ -646,6 +694,10 @@ fn subtitle_text_units(text: &str) -> f64 {
     units.max(1.0)
 }
 
+fn subtitle_should_reduce_transparency() -> bool {
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
+}
+
 fn subtitle_window_frame(mtm: MainThreadMarker, text: &str) -> NSRect {
     let default_rect = NSRect::new(
         NSPoint::new(120.0, 48.0),
@@ -661,13 +713,13 @@ fn subtitle_window_frame(mtm: MainThreadMarker, text: &str) -> NSRect {
         .min(SUBTITLE_MAX_WIDTH)
         .min(max_available_width);
     let text_units = subtitle_text_units(text);
-    let preferred_content_width = ((text_units + 4.0) * (SUBTITLE_FONT_SIZE * 0.92)).max(96.0);
+    let preferred_content_width = ((text_units + 8.0) * (SUBTITLE_FONT_SIZE * 0.94)).max(96.0);
     let width = (preferred_content_width + SUBTITLE_HORIZONTAL_PADDING * 2.0)
         .max(SUBTITLE_MIN_WIDTH)
         .min(max_width);
     let content_width = (width - SUBTITLE_HORIZONTAL_PADDING * 2.0).max(96.0);
-    let units_per_line = (content_width / (SUBTITLE_FONT_SIZE * 0.68)).max(4.0);
-    let line_count = ((text_units + 2.5) / units_per_line).ceil().clamp(1.0, 4.0);
+    let units_per_line = (content_width / (SUBTITLE_FONT_SIZE * 0.62)).max(4.0);
+    let line_count = ((text_units + 4.5) / units_per_line).ceil().clamp(1.0, 5.0);
     let height = (line_count * SUBTITLE_LINE_HEIGHT + SUBTITLE_VERTICAL_PADDING * 2.0)
         .max(SUBTITLE_MIN_HEIGHT)
         .min(SUBTITLE_MAX_HEIGHT);
@@ -681,6 +733,10 @@ fn subtitle_content_frame(window_frame: NSRect) -> NSRect {
         NSPoint::new(0.0, 0.0),
         NSSize::new(window_frame.size.width, window_frame.size.height),
     )
+}
+
+fn subtitle_corner_radius(window_frame: NSRect) -> f64 {
+    (window_frame.size.height * 0.5).clamp(22.0, 34.0)
 }
 
 fn subtitle_label_frame(window_frame: NSRect) -> NSRect {
@@ -1276,7 +1332,13 @@ fn main() {
     }
 
     if args.subtitle_overlay {
-        eprintln!("[vox-dictation] subtitle overlay enabled");
+        if subtitle_should_reduce_transparency() {
+            eprintln!(
+                "[vox-dictation] subtitle overlay enabled (fallback style: macOS Reduce Transparency is on)"
+            );
+        } else {
+            eprintln!("[vox-dictation] subtitle overlay enabled (glass style)");
+        }
     }
 
     eprintln!(
