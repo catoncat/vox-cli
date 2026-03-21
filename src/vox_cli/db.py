@@ -5,7 +5,7 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -179,6 +179,53 @@ def list_tasks(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
 
 def get_task(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row | None:
     return conn.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+
+
+def cleanup_tasks(
+    conn: sqlite3.Connection,
+    *,
+    stale_running: bool = True,
+    delete_finished: bool = False,
+    older_than_hours: float | None = None,
+) -> dict[str, int]:
+    cutoff: str | None = None
+    if older_than_hours is not None:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=older_than_hours)).isoformat()
+
+    staled = 0
+    deleted = 0
+
+    if stale_running:
+        query = "SELECT id FROM tasks WHERE status = 'running'"
+        params: list[str] = []
+        if cutoff is not None:
+            query += ' AND started_at <= ?'
+            params.append(cutoff)
+        ids = [row['id'] for row in conn.execute(query, params).fetchall()]
+        if ids:
+            staled = len(ids)
+            conn.executemany(
+                '''
+                UPDATE tasks
+                SET status = 'stale', error_message = ?, ended_at = ?
+                WHERE id = ?
+                ''',
+                [('cleaned up stale task state', _utc_now(), task_id) for task_id in ids],
+            )
+
+    if delete_finished:
+        query = "SELECT id FROM tasks WHERE status != 'running'"
+        params = []
+        if cutoff is not None:
+            query += ' AND COALESCE(ended_at, started_at) <= ?'
+            params.append(cutoff)
+        ids = [row['id'] for row in conn.execute(query, params).fetchall()]
+        if ids:
+            deleted = len(ids)
+            conn.executemany('DELETE FROM tasks WHERE id = ?', [(task_id,) for task_id in ids])
+
+    conn.commit()
+    return {'staled': staled, 'deleted': deleted}
 
 
 @contextmanager

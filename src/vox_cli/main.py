@@ -31,6 +31,7 @@ from .config import (
 )
 from .db import (
     add_profile_sample,
+    cleanup_tasks,
     complete_task,
     connect,
     create_profile,
@@ -45,8 +46,10 @@ from .db import (
 from .models import MODEL_REGISTRY
 from .runtime import RuntimeExecutionOptions
 from .services.asr_service import stream_to_ndjson, stream_transcribe_file, transcribe_file
+from .services.dictation_context_service import capture_dictation_context
 from .services.dictation_service import launch_dictation
 from .services.realtime_asr_service import run_realtime_session_server
+from .services.dictation_ui_service import launch_dictation_ui
 from .services.self_service import update_global_install
 from .services.model_service import ensure_model_downloaded, list_model_statuses, resolve_model
 from .services.tts_service import clone_to_file, custom_to_file, design_to_file
@@ -88,6 +91,16 @@ def _print_json(payload: dict | list) -> None:
     console.print_json(json.dumps(payload, ensure_ascii=False))
 
 
+def _redact_config_payload(payload: dict) -> dict:
+    redacted = json.loads(json.dumps(payload, ensure_ascii=False))
+    llm = redacted.get('dictation', {}).get('llm', {})
+    if llm.get('api_key'):
+        llm['api_key'] = '<redacted>'
+    if isinstance(llm.get('api_key_env'), str) and llm['api_key_env'].startswith('sk-'):
+        llm['api_key_env'] = '<redacted-invalid-secret>'
+    return redacted
+
+
 def _fail(message: str, code: int = 1) -> None:
     err_console.print(f'[red]{message}[/red]')
     raise typer.Exit(code=code)
@@ -98,6 +111,11 @@ model_app = typer.Typer(help='Model operations')
 profile_app = typer.Typer(help='Profile operations')
 asr_app = typer.Typer(help='ASR operations')
 tts_app = typer.Typer(help='TTS operations')
+dictation_app = typer.Typer(
+    help='Native dictation operations',
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
 pipeline_app = typer.Typer(help='End-to-end pipelines')
 task_app = typer.Typer(help='Task inspection')
 config_app = typer.Typer(help='Config operations')
@@ -108,6 +126,7 @@ app.add_typer(model_app, name='model')
 app.add_typer(profile_app, name='profile')
 app.add_typer(asr_app, name='asr')
 app.add_typer(tts_app, name='tts')
+app.add_typer(dictation_app, name='dictation')
 app.add_typer(pipeline_app, name='pipeline')
 app.add_typer(task_app, name='task')
 app.add_typer(config_app, name='config')
@@ -192,18 +211,20 @@ def doctor_cmd(ctx: typer.Context, as_json: bool = typer.Option(False, '--json')
         raise typer.Exit(code=1)
 
 
-@app.command('dictation')
-def dictation_cmd(
-    ctx: typer.Context,
-    lang: str = typer.Option('zh', '--lang'),
-    model: str = typer.Option('auto', '--model'),
-    host: str = typer.Option('127.0.0.1', '--host'),
-    port: int | None = typer.Option(None, '--port'),
-    rebuild_native: bool = typer.Option(False, '--rebuild-native'),
-    partial_interval_ms: int = typer.Option(0, '--partial-interval-ms', min=0),
-    verbose: bool = typer.Option(False, '--verbose', help='Print verbose dictation helper logs'),
+def _run_dictation_cmd(
+    state: AppState,
+    *,
+    lang: str,
+    model: str,
+    host: str,
+    port: int | None,
+    rebuild_native: bool,
+    partial_interval_ms: int | None,
+    type_partial: bool,
+    subtitle_overlay: bool,
+    llm_timeout_sec: float | None,
+    verbose: bool,
 ) -> None:
-    state: AppState = ctx.obj
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
         _fail('vox dictation currently supports macOS Apple Silicon only')
 
@@ -216,13 +237,158 @@ def dictation_cmd(
             port=port,
             rebuild_native=rebuild_native,
             partial_interval_ms=partial_interval_ms,
+            type_partial=type_partial,
+            subtitle_overlay=subtitle_overlay,
+            llm_timeout_sec=llm_timeout_sec,
             verbose=verbose,
+            on_ready=lambda message: console.print(message),
         )
     except Exception as e:
         _fail(str(e))
 
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
+
+
+@dictation_app.callback(invoke_without_command=True)
+def dictation_cmd(
+    ctx: typer.Context,
+    lang: str = typer.Option('zh', '--lang'),
+    model: str = typer.Option('auto', '--model'),
+    host: str = typer.Option('127.0.0.1', '--host'),
+    port: int | None = typer.Option(None, '--port'),
+    rebuild_native: bool = typer.Option(False, '--rebuild-native'),
+    partial_interval_ms: int | None = typer.Option(
+        None,
+        '--partial-interval-ms',
+        min=0,
+        help='Partial transcript interval in ms; defaults to 250ms when subtitle preview or partial typing is enabled',
+    ),
+    type_partial: bool = typer.Option(
+        False,
+        '--type-partial/--no-type-partial',
+        help='Experimental: type partial transcripts into the focused input before the final text arrives',
+    ),
+    subtitle_overlay: bool = typer.Option(
+        False,
+        '--subtitle-overlay/--no-subtitle-overlay',
+        help='Show live dictation subtitles in a bottom overlay while recording',
+    ),
+    llm_timeout_sec: float | None = typer.Option(None, '--llm-timeout-sec', min=0.1),
+    verbose: bool = typer.Option(False, '--verbose', help='Print verbose dictation helper logs'),
+) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+    state: AppState = ctx.obj
+    _run_dictation_cmd(
+        state,
+        lang=lang,
+        model=model,
+        host=host,
+        port=port,
+        rebuild_native=rebuild_native,
+        partial_interval_ms=partial_interval_ms,
+        type_partial=type_partial,
+        subtitle_overlay=subtitle_overlay,
+        llm_timeout_sec=llm_timeout_sec,
+        verbose=verbose,
+    )
+
+
+@dictation_app.command('start')
+def dictation_start_cmd(
+    ctx: typer.Context,
+    lang: str = typer.Option('zh', '--lang'),
+    model: str = typer.Option('auto', '--model'),
+    host: str = typer.Option('127.0.0.1', '--host'),
+    port: int | None = typer.Option(None, '--port'),
+    rebuild_native: bool = typer.Option(False, '--rebuild-native'),
+    partial_interval_ms: int | None = typer.Option(
+        None,
+        '--partial-interval-ms',
+        min=0,
+        help='Partial transcript interval in ms; defaults to 250ms when subtitle preview or partial typing is enabled',
+    ),
+    type_partial: bool = typer.Option(
+        False,
+        '--type-partial/--no-type-partial',
+        help='Experimental: type partial transcripts into the focused input before the final text arrives',
+    ),
+    subtitle_overlay: bool = typer.Option(
+        False,
+        '--subtitle-overlay/--no-subtitle-overlay',
+        help='Show live dictation subtitles in a bottom overlay while recording',
+    ),
+    llm_timeout_sec: float | None = typer.Option(None, '--llm-timeout-sec', min=0.1),
+    verbose: bool = typer.Option(False, '--verbose', help='Print verbose dictation helper logs'),
+) -> None:
+    state: AppState = ctx.obj
+    _run_dictation_cmd(
+        state,
+        lang=lang,
+        model=model,
+        host=host,
+        port=port,
+        rebuild_native=rebuild_native,
+        partial_interval_ms=partial_interval_ms,
+        type_partial=type_partial,
+        subtitle_overlay=subtitle_overlay,
+        llm_timeout_sec=llm_timeout_sec,
+        verbose=verbose,
+    )
+
+
+@dictation_app.command('context')
+def dictation_context_cmd(
+    ctx: typer.Context,
+    as_json: bool = typer.Option(False, '--json'),
+) -> None:
+    state: AppState = ctx.obj
+    try:
+        context = capture_dictation_context(state.config, force=True)
+    except Exception as e:
+        _fail(str(e))
+
+    if context is None:
+        if as_json:
+            _print_json({'context': None})
+        else:
+            console.print('No focused context available')
+        return
+
+    payload = context.to_dict()
+    if as_json:
+        _print_json(payload)
+    else:
+        console.print(payload)
+
+
+@dictation_app.command('ui')
+def dictation_ui_cmd(
+    ctx: typer.Context,
+    host: str = typer.Option('127.0.0.1', '--host'),
+    port: int | None = typer.Option(None, '--port'),
+    open_browser: bool = typer.Option(True, '--open/--no-open'),
+) -> None:
+    state: AppState = ctx.obj
+    try:
+        actual_port = port
+        if actual_port is None:
+            import socket
+
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind((host, 0))
+                actual_port = int(sock.getsockname()[1])
+        url = f'http://{host}:{actual_port}'
+        console.print(f'Dictation UI ready at {url}')
+        launch_dictation_ui(
+            state.config,
+            host=host,
+            port=actual_port,
+            open_browser=open_browser,
+        )
+    except Exception as e:
+        _fail(str(e))
 
 
 @vmic_app.command('path')
@@ -332,7 +498,7 @@ def self_update_cmd(
 @config_app.command('show')
 def config_show_cmd(ctx: typer.Context, as_json: bool = typer.Option(True, '--json/--pretty')) -> None:
     state: AppState = ctx.obj
-    payload = state.config.model_dump()
+    payload = _redact_config_payload(state.config.model_dump())
     if as_json:
         _print_json(payload)
     else:
@@ -556,6 +722,17 @@ def asr_session_server_cmd(
     lang: str = typer.Option('auto', '--lang'),
     model: str = typer.Option('auto', '--model'),
     sample_rate: int = typer.Option(16000, '--sample-rate'),
+    dictation_postprocess: bool = typer.Option(
+        False,
+        '--dictation-postprocess',
+        help='Apply dictation text post-processing to final transcripts',
+    ),
+    dictation_llm_timeout_sec: float | None = typer.Option(
+        None,
+        '--dictation-llm-timeout-sec',
+        min=0.1,
+        help='Override dictation LLM timeout for this server process',
+    ),
     wait: bool | None = typer.Option(None, '--wait/--no-wait'),
     wait_timeout: int | None = typer.Option(None, '--wait-timeout', min=1),
 ) -> None:
@@ -586,6 +763,8 @@ def asr_session_server_cmd(
                     port=port,
                     sample_rate=sample_rate,
                     runtime_options=runtime_options,
+                    apply_dictation_postprocess=dictation_postprocess,
+                    dictation_llm_timeout_sec=dictation_llm_timeout_sec,
                 )
                 complete_task(conn, task.id, {'host': host, 'port': port, 'model_id': resolved_model})
             except Exception as e:
@@ -1036,6 +1215,29 @@ def task_show_cmd(
         _fail(f'Task not found: {task_id}')
 
     payload = dict(row)
+    if as_json:
+        _print_json(payload)
+    else:
+        console.print(payload)
+
+
+@task_app.command('cleanup')
+def task_cleanup_cmd(
+    ctx: typer.Context,
+    stale_running: bool = typer.Option(True, '--stale-running/--no-stale-running'),
+    delete_finished: bool = typer.Option(False, '--delete-finished/--keep-finished'),
+    older_than_hours: float | None = typer.Option(None, '--older-than-hours', min=0),
+    as_json: bool = typer.Option(False, '--json'),
+) -> None:
+    state: AppState = ctx.obj
+    with connect(state.db_path) as conn:
+        payload = cleanup_tasks(
+            conn,
+            stale_running=stale_running,
+            delete_finished=delete_finished,
+            older_than_hours=older_than_hours,
+        )
+
     if as_json:
         _print_json(payload)
     else:

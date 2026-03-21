@@ -174,6 +174,10 @@ def _lock_path(config: VoxConfig, resource: str) -> Path:
     return locks_dir / _lock_filename(resource)
 
 
+def read_runtime_lock_state(config: VoxConfig, resource: str) -> RuntimeLockState:
+    return _read_lock_state(_lock_path(config, resource), resource)
+
+
 @contextmanager
 def acquire_runtime_lock_pool(
     config: VoxConfig,

@@ -68,9 +68,22 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
         kind='asr',
         quantization='4bit',
     ),
+    'qwen-asr-0.6b-8bit': ModelSpec(
+        model_id='qwen-asr-0.6b-8bit',
+        repo_id='mlx-community/Qwen3-ASR-0.6B-8bit',
+        kind='asr',
+        quantization='8bit',
+    ),
+    'qwen-asr-0.6b-4bit': ModelSpec(
+        model_id='qwen-asr-0.6b-4bit',
+        repo_id='mlx-community/Qwen3-ASR-0.6B-4bit',
+        kind='asr',
+        quantization='4bit',
+    ),
 }
 
 DEFAULT_TTS_MODEL_ID = 'qwen-tts-0.6b-base-8bit'
 DEFAULT_TTS_CUSTOM_MODEL_ID = 'qwen-tts-0.6b-customvoice-8bit'
 DEFAULT_TTS_DESIGN_MODEL_ID = 'qwen-tts-0.6b-voicedesign-8bit'
 ASR_MODEL_CANDIDATES = ('qwen-asr-1.7b-8bit', 'qwen-asr-1.7b-4bit')
+DICTATION_ASR_MODEL_ID = 'qwen-asr-0.6b-4bit'
