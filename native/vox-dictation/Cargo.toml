@@ -10,12 +10,24 @@ futures-util = "0.3"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = [
   "NSApplication",
+  "NSColor",
+  "NSControl",
+  "NSFont",
+  "NSGlassEffectView",
+  "NSGraphics",
   "NSImage",
   "NSMenu",
   "NSMenuItem",
+  "NSParagraphStyle",
+  "NSResponder",
+  "NSScreen",
   "NSStatusBar",
   "NSStatusItem",
   "NSStatusBarButton",
+  "NSText",
+  "NSTextField",
+  "NSView",
+  "NSWindow",
   "block2",
 ] }
 objc2-avf-audio = { version = "0.3.2", features = [
