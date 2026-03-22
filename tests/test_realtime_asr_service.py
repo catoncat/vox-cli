@@ -7,7 +7,9 @@ from vox_cli.services.dictation_postprocess_service import DictationPostprocessR
 from vox_cli.services.realtime_asr_service import (
     RealtimeASRSession,
     RealtimeTranscript,
+    _apply_local_partial_preview,
     _apply_dictation_postprocess,
+    _compute_incremental_stable_prefix,
     _remaining_context_budget_ms,
 )
 
@@ -194,3 +196,74 @@ def test_remaining_context_budget_ms_uses_elapsed_capture_window() -> None:
     )
 
     assert exhausted == 0
+
+
+def test_compute_incremental_stable_prefix_keeps_trailing_guard_window() -> None:
+    stable = _compute_incremental_stable_prefix(
+        '第一句已经稳定。第二句还在生',
+        '第一句已经稳定。第二句还在生成中',
+    )
+
+    assert stable == '第一句已经稳定。'
+
+
+class _PreviewPostprocessor:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def process(
+        self,
+        text: str,
+        *,
+        language: str | None = None,
+        context=None,
+        emit=None,
+        allow_llm: bool = True,
+    ) -> DictationPostprocessResult:
+        self.calls.append(
+            {
+                'text': text,
+                'language': language,
+                'context': context,
+                'allow_llm': allow_llm,
+            }
+        )
+        return DictationPostprocessResult(
+            text=f'preview::{text}',
+            metadata={'postprocess_ms': 3, 'changed': True},
+        )
+
+
+def test_apply_local_partial_preview_merges_completed_prefix_without_llm() -> None:
+    postprocessor = _PreviewPostprocessor()
+    transcript = RealtimeTranscript(
+        text='我在 ColdX CLI 里说话',
+        is_partial=True,
+        language='Chinese',
+        timings={'total_ms': 20},
+    )
+
+    result = _apply_local_partial_preview(
+        transcript,
+        postprocessor,
+        completed_raw_text='我在 ColdX CLI ',
+        completed_text='我在 Codex CLI ',
+        context_snapshot=DictationContextSnapshot(
+            context=DictationContext(
+                source='ghostty',
+                app_name='Ghostty',
+                window_title='codex',
+                element_role='AXTextArea',
+                context_text='context text',
+            ),
+            capture_ms=18,
+        ),
+    )
+
+    assert result.text == 'preview::我在 Codex CLI 里说话'
+    assert result.timings is not None
+    assert result.timings['preview_postprocess_ms'] == 3
+    assert result.timings['preview_changed'] is True
+    assert result.timings['preview_completed_chars'] == len('我在 Codex CLI ')
+    assert postprocessor.calls[0]['text'] == '我在 Codex CLI 里说话'
+    assert postprocessor.calls[0]['allow_llm'] is False

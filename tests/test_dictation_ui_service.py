@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from vox_cli.config import RuntimeConfig, VoxConfig
+from vox_cli.config import RuntimeConfig, VoxConfig, get_dictation_prompt_preset
 from vox_cli.services.dictation_ui_service import (
     _parse_context_delay_ms,
+    build_dictation_ui_state,
     render_dictation_ui_sections,
     save_dictation_ui_state,
     strip_managed_dictation_ui_sections,
@@ -13,6 +14,16 @@ def test_strip_managed_dictation_ui_sections_preserves_other_sections() -> None:
     raw = """
 [runtime]
 home_dir = "~/.vox"
+
+[dictation.transforms]
+fullwidth_to_halfwidth = true
+
+[dictation.llm]
+enabled = true
+api_key = "sk-demo"
+
+[dictation.llm.headers]
+X-Title = "vox"
 
 [dictation.context]
 enabled = true
@@ -37,6 +48,9 @@ default_model = "demo"
 
     assert '[runtime]' in result
     assert '[tts]' in result
+    assert '[dictation.transforms]' not in result
+    assert '[dictation.llm]' not in result
+    assert '[dictation.llm.headers]' in result
     assert '[dictation.context]' not in result
     assert '[dictation.hotwords]' not in result
     assert '[dictation.hints]' not in result
@@ -45,7 +59,28 @@ default_model = "demo"
 def test_render_dictation_ui_sections_outputs_expected_toml() -> None:
     rendered = render_dictation_ui_sections(
         {
-            'context': {'enabled': True, 'max_chars': 1400},
+            'transforms': {
+                'fullwidth_to_halfwidth': True,
+                'space_around_punct': False,
+                'space_between_cjk': True,
+                'strip_trailing_punctuation': True,
+            },
+            'llm': {
+                'enabled': True,
+                'provider': 'openrouter',
+                'base_url': 'https://openrouter.ai/api/v1',
+                'model': 'openai/gpt-4o-mini',
+                'api_key_env': 'OPENROUTER_API_KEY',
+                'timeout_sec': 8.5,
+                'stream': True,
+                'temperature': 0.0,
+                'max_tokens': 256,
+                'prompt_preset': 'arena',
+                'custom_prompt_enabled': True,
+                'system_prompt': '第一行\n第二行',
+                'user_prompt_template': 'LANG={language}\nTEXT={text}',
+            },
+            'context': {'enabled': True, 'max_chars': 1400, 'capture_budget_ms': 900},
             'hotwords': {
                 'enabled': True,
                 'rewrite_aliases': True,
@@ -59,11 +94,26 @@ def test_render_dictation_ui_sections_outputs_expected_toml() -> None:
                 'enabled': True,
                 'items': ['说话人前后鼻音不分。'],
             },
-        }
+        },
+        preserved_llm_api_key='sk-demo',
     )
 
+    assert '[dictation.transforms]' in rendered
+    assert 'fullwidth_to_halfwidth = true' in rendered
+    assert 'space_between_cjk = true' in rendered
+    assert '[dictation.llm]' in rendered
+    assert 'provider = "openrouter"' in rendered
+    assert 'prompt_preset = "arena"' in rendered
+    assert 'base_url = "https://openrouter.ai/api/v1"' in rendered
+    assert 'model = "openai/gpt-4o-mini"' in rendered
+    assert 'api_key = "sk-demo"' in rendered
+    assert 'api_key_env = "OPENROUTER_API_KEY"' in rendered
+    assert "system_prompt = '''" in rendered
+    assert '第一行' in rendered
+    assert 'user_prompt_template = ' in rendered
     assert '[dictation.context]' in rendered
     assert 'max_chars = 1400' in rendered
+    assert 'capture_budget_ms = 900' in rendered
     assert '[[dictation.hotwords.entries]]' in rendered
     assert 'value = "潮汕"' in rendered
     assert 'aliases = ["潮上"]' in rendered
@@ -77,6 +127,11 @@ def test_save_dictation_ui_state_updates_only_managed_sections(tmp_path) -> None
     config_path.write_text(
         '[runtime]\n'
         'home_dir = "~/.vox"\n\n'
+        '[dictation.llm]\n'
+        'enabled = true\n'
+        'api_key = "sk-existing"\n\n'
+        '[dictation.llm.headers]\n'
+        'X-Title = "vox"\n\n'
         '[tts]\n'
         'default_model = "base"\n',
         encoding='utf-8',
@@ -85,7 +140,29 @@ def test_save_dictation_ui_state_updates_only_managed_sections(tmp_path) -> None
     state = save_dictation_ui_state(
         config,
         {
-            'context': {'enabled': True, 'max_chars': 900},
+            'transforms': {
+                'fullwidth_to_halfwidth': True,
+                'space_around_punct': False,
+                'space_between_cjk': False,
+                'strip_trailing_punctuation': True,
+            },
+            'llm': {
+                'enabled': True,
+                'provider': 'dashscope',
+                'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                'model': 'qwen-flash',
+                'api_key_env': 'DASHSCOPE_API_KEY',
+                'timeout_sec': 6.5,
+                'stream': True,
+                'temperature': 0.0,
+                'max_tokens': 128,
+                'prompt_preset': 'arena',
+                'custom_prompt_enabled': True,
+                'system_prompt': '你是修订器',
+                'user_prompt_template': 'TEXT={text}',
+                'api_key_present': True,
+            },
+            'context': {'enabled': True, 'max_chars': 900, 'capture_budget_ms': 750},
             'hotwords': {
                 'enabled': True,
                 'rewrite_aliases': True,
@@ -104,11 +181,78 @@ def test_save_dictation_ui_state_updates_only_managed_sections(tmp_path) -> None
     text = config_path.read_text(encoding='utf-8')
     assert '[runtime]' in text
     assert '[tts]' in text
+    assert '[dictation.transforms]' in text
+    assert '[dictation.llm]' in text
+    assert 'provider = "dashscope"' in text
+    assert 'prompt_preset = "arena"' in text
+    assert 'api_key = "sk-existing"' in text
+    assert '[dictation.llm.headers]' in text
     assert '[dictation.context]' in text
     assert '[dictation.hotwords]' in text
     assert '[dictation.hints]' in text
+    assert state['state']['llm']['api_key_present'] is True
     assert state['state']['context']['max_chars'] == 900
     assert state['state']['hotwords']['entries'][0]['value'] == '潮汕'
+
+
+def test_build_dictation_ui_state_does_not_expose_inline_api_key(tmp_path) -> None:
+    config = VoxConfig(runtime=RuntimeConfig(home_dir=str(tmp_path)))
+    config_path = tmp_path / 'config.toml'
+    config_path.write_text(
+        '[dictation.llm]\n'
+        'enabled = true\n'
+        'api_key = "sk-secret"\n'
+        'api_key_env = "OPENAI_API_KEY"\n'
+        'system_prompt = "keep"\n',
+        encoding='utf-8',
+    )
+
+    payload = build_dictation_ui_state(config)
+
+    assert payload['state']['llm']['enabled'] is True
+    assert payload['state']['llm']['api_key_present'] is True
+    assert payload['state']['llm']['custom_prompt_enabled'] is True
+    assert payload['state']['llm']['prompt_preset'] == 'default'
+    assert payload['prompt_presets']
+    assert 'api_key' not in payload['state']['llm']
+
+
+def test_build_dictation_ui_state_recognizes_legacy_builtin_prompt_as_preset(tmp_path) -> None:
+    config = VoxConfig(runtime=RuntimeConfig(home_dir=str(tmp_path)))
+    config_path = tmp_path / 'config.toml'
+    preset = get_dictation_prompt_preset('default')
+    config_path.write_text(
+        '[dictation.llm]\n'
+        f"system_prompt = '''\n{preset.system_prompt}\n'''\n"
+        f"user_prompt_template = '''\n{preset.user_prompt_template}\n'''\n",
+        encoding='utf-8',
+    )
+
+    payload = build_dictation_ui_state(config)
+
+    assert payload['state']['llm']['prompt_preset'] == 'default'
+    assert payload['state']['llm']['custom_prompt_enabled'] is False
+    assert payload['state']['llm']['system_prompt'] == preset.system_prompt
+    assert payload['state']['llm']['user_prompt_template'] == preset.user_prompt_template
+
+
+def test_render_dictation_ui_sections_omits_prompt_override_when_using_preset() -> None:
+    rendered = render_dictation_ui_sections(
+        {
+            'llm': {
+                'enabled': True,
+                'provider': 'openai-compatible',
+                'prompt_preset': 'literal',
+                'custom_prompt_enabled': False,
+                'system_prompt': 'should not persist',
+                'user_prompt_template': 'TEXT={text}',
+            },
+        }
+    )
+
+    assert 'prompt_preset = "literal"' in rendered
+    assert 'system_prompt =' not in rendered
+    assert 'user_prompt_template =' not in rendered
 
 
 def test_parse_context_delay_ms_clamps_to_safe_range() -> None:

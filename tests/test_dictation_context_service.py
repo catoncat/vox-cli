@@ -35,14 +35,16 @@ def test_capture_ghostty_context_truncates_tail(monkeypatch) -> None:
         source='ghostty',
         app_name='Ghostty',
         window_title='codex',
+        surface='terminal_chat',
         element_role='AXTextArea',
         element_title=None,
         selected_text=None,
+        focus_text='abcdef',
         context_text='abcdef',
     )
 
 
-def test_capture_chromium_context_prefers_selection(monkeypatch) -> None:
+def test_capture_chromium_context_prefers_page_context_for_chat_surfaces(monkeypatch) -> None:
     outputs = iter(
         [
             'Codex Chat\nhttps://example.com/chat',
@@ -68,9 +70,11 @@ def test_capture_chromium_context_prefers_selection(monkeypatch) -> None:
         source='chromium',
         app_name='Google Chrome',
         window_title='Codex Chat',
+        surface='browser_chat',
         page_url='https://example.com/chat',
         selected_text='selected text',
-        context_text='selected text',
+        focus_text='input text',
+        context_text='nearby page text',
     )
 
 
@@ -100,8 +104,10 @@ def test_capture_chromium_context_prefers_page_context_over_input_box(monkeypatc
         source='chromium',
         app_name='Google Chrome',
         window_title='Codex Chat',
+        surface='browser_chat',
         page_url='https://example.com/chat',
         selected_text=None,
+        focus_text='draft in input',
         context_text='上一轮对话\n这个页面真正有用的上下文',
     )
 
@@ -131,6 +137,23 @@ I could say, "如果你愿意，我下一步可以直接帮你跑一轮。"
     result = dictation_context_service._sanitize_terminal_context(raw, 120)
 
     assert result == 'I could say, "如果你愿意，我下一步可以直接帮你跑一轮。"\n作为一个潮汕人，我前后鼻音不分。'
+
+
+def test_sanitize_terminal_context_keeps_recent_mixed_language_context() -> None:
+    raw = """
+❯ uv run vox dictation start --lang zh --verbose
+model qwen-turbo-latest stream=true first_token_ms=448
+我们现在来测一下 Ghostty 的上下文效果
+Codex CLI is editing realtime_asr_service.py right now
+"""
+
+    result = dictation_context_service._sanitize_terminal_context(raw, 200)
+
+    assert result == (
+        'model qwen-turbo-latest stream=true first_token_ms=448\n'
+        '我们现在来测一下 Ghostty 的上下文效果\n'
+        'Codex CLI is editing realtime_asr_service.py right now'
+    )
 
 
 def test_sanitize_page_context_avoids_being_dominated_by_log_lines() -> None:

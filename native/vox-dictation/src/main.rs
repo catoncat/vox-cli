@@ -83,6 +83,10 @@ static LAST_RECORDING_STARTED_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_FLUSH_SENT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_FLUSH_UTTERANCE_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_FINAL_UTTERANCE_ID: AtomicU64 = AtomicU64::new(0);
+static PARTIAL_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static PARTIAL_SENT_COUNT: AtomicU64 = AtomicU64::new(0);
+static PARTIAL_SKIPPED_BUSY_COUNT: AtomicU64 = AtomicU64::new(0);
+static PARTIAL_RECEIVED_COUNT: AtomicU64 = AtomicU64::new(0);
 static SYNTHETIC_INPUT_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 static SUBTITLE_UPDATE_SEQ: AtomicU64 = AtomicU64::new(0);
 static AUDIO_CALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -367,6 +371,10 @@ impl Controller {
         SENT_SAMPLES.store(0, Ordering::SeqCst);
         AUDIO_CALLBACK_COUNT.store(0, Ordering::SeqCst);
         AUDIO_UNSUPPORTED_BUFFER_COUNT.store(0, Ordering::SeqCst);
+        PARTIAL_REQUEST_IN_FLIGHT.store(false, Ordering::SeqCst);
+        PARTIAL_SENT_COUNT.store(0, Ordering::SeqCst);
+        PARTIAL_SKIPPED_BUSY_COUNT.store(0, Ordering::SeqCst);
+        PARTIAL_RECEIVED_COUNT.store(0, Ordering::SeqCst);
         LAST_SPEECH_MS.store(now_millis(), Ordering::SeqCst);
         LAST_RECORDING_STARTED_MS.store(now_millis(), Ordering::SeqCst);
         clear_partial_typing_state();
@@ -542,6 +550,7 @@ impl Controller {
         unsafe { self.audio_engine.reset() };
 
         if !flush_result {
+            PARTIAL_REQUEST_IN_FLIGHT.store(false, Ordering::SeqCst);
             clear_partial_typing_state();
             dispatch_subtitle_hide();
             let _ = self.backend_tx.send(BackendCommand::Reset);
@@ -573,17 +582,11 @@ impl Controller {
                 );
             }
             eprintln!("[vox-dictation] discarded short/quiet utterance");
+            PARTIAL_REQUEST_IN_FLIGHT.store(false, Ordering::SeqCst);
             clear_partial_typing_state();
             dispatch_subtitle_hide();
             let _ = queue_backend_command(&self.backend_tx, BackendCommand::Reset, "reset");
         } else {
-            if SHOW_SUBTITLE_OVERLAY.load(Ordering::SeqCst) || TYPE_PARTIAL.load(Ordering::SeqCst) {
-                let _ = queue_backend_command(
-                    &self.backend_tx,
-                    BackendCommand::Partial,
-                    "partial_on_stop",
-                );
-            }
             let utterance_id = NEXT_UTTERANCE_ID.fetch_add(1, Ordering::SeqCst);
             if queue_backend_command(
                 &self.backend_tx,
@@ -1168,6 +1171,12 @@ fn spawn_backend_worker(
                                     && BACKEND_READY.load(Ordering::SeqCst)
                                     && last.elapsed() >= Duration::from_millis(partial_interval_ms)
                                 {
+                                    if PARTIAL_REQUEST_IN_FLIGHT.load(Ordering::SeqCst) {
+                                        PARTIAL_SKIPPED_BUSY_COUNT.fetch_add(1, Ordering::SeqCst);
+                                        last = Instant::now();
+                                        thread::sleep(Duration::from_millis(50));
+                                        continue;
+                                    }
                                     if !queue_backend_command(
                                         &writer_tx,
                                         BackendCommand::Partial,
@@ -1175,6 +1184,8 @@ fn spawn_backend_worker(
                                     ) {
                                         break;
                                     }
+                                    PARTIAL_REQUEST_IN_FLIGHT.store(true, Ordering::SeqCst);
+                                    PARTIAL_SENT_COUNT.fetch_add(1, Ordering::SeqCst);
                                     last = Instant::now();
                                 }
                                 thread::sleep(Duration::from_millis(50));
@@ -1225,6 +1236,8 @@ fn spawn_backend_worker(
                                             }
                                         } else if let Some(text) = msg.text {
                                             if msg.is_partial.unwrap_or(false) {
+                                                PARTIAL_REQUEST_IN_FLIGHT.store(false, Ordering::SeqCst);
+                                                PARTIAL_RECEIVED_COUNT.fetch_add(1, Ordering::SeqCst);
                                                 if !text.is_empty() {
                                                     verbose_log!("[vox-dictation] partial: {text}");
                                                     if SHOW_SUBTITLE_OVERLAY.load(Ordering::SeqCst) {
@@ -1255,6 +1268,7 @@ fn spawn_backend_worker(
                                                     }
                                                 }
                                             } else if !text.trim().is_empty() {
+                                                PARTIAL_REQUEST_IN_FLIGHT.store(false, Ordering::SeqCst);
                                                 let received_at_ms = now_millis();
                                                 let flush_utterance_id = LAST_FLUSH_UTTERANCE_ID.load(Ordering::SeqCst);
                                                 let flush_sent_at_ms = LAST_FLUSH_SENT_MS.load(Ordering::SeqCst);
@@ -1289,7 +1303,7 @@ fn spawn_backend_worker(
                                                         0
                                                     };
                                                     verbose_log!(
-                                                        "[vox-dictation] timings utterance_id={} capture_ms={} flush_roundtrip_ms={} audio_ms={} warmup_ms={} infer_ms={} context_capture_ms={} context_available={} context_source={} postprocess_ms={} llm_ms={} llm_used={} llm_timeout_sec={} llm_provider={} llm_model={} backend_total_ms={} type_ms={} warmup_reason={}",
+                                                        "[vox-dictation] timings utterance_id={} capture_ms={} flush_roundtrip_ms={} audio_ms={} warmup_ms={} infer_ms={} context_capture_ms={} context_available={} context_source={} postprocess_ms={} llm_ms={} llm_used={} llm_timeout_sec={} llm_provider={} llm_model={} backend_total_ms={} type_ms={} partial_sent={} partial_returned={} partial_skipped={} warmup_reason={}",
                                                         utterance_id,
                                                         capture_ms,
                                                         flush_roundtrip_ms,
@@ -1307,6 +1321,9 @@ fn spawn_backend_worker(
                                                         timings.llm_model.unwrap_or_else(|| "-".to_string()),
                                                         timings.total_ms.unwrap_or(0),
                                                         type_elapsed_ms,
+                                                        PARTIAL_SENT_COUNT.load(Ordering::SeqCst),
+                                                        PARTIAL_RECEIVED_COUNT.load(Ordering::SeqCst),
+                                                        PARTIAL_SKIPPED_BUSY_COUNT.load(Ordering::SeqCst),
                                                         timings.warmup_reason.unwrap_or_else(|| "-".to_string()),
                                                     );
                                                 }
@@ -1323,6 +1340,7 @@ fn spawn_backend_worker(
                             }
                         }
                         BACKEND_READY.store(false, Ordering::SeqCst);
+                        PARTIAL_REQUEST_IN_FLIGHT.store(false, Ordering::SeqCst);
                         clear_partial_typing_state();
                         dispatch_subtitle_hide();
                     });
@@ -1348,7 +1366,12 @@ fn spawn_backend_worker(
                                 write.send(Message::Text(payload.into())).await
                             }
                             BackendCommand::Partial => {
-                                write.send(Message::Text("{\"action\":\"partial\"}".into())).await
+                                let utterance_id = NEXT_UTTERANCE_ID.load(Ordering::SeqCst);
+                                let payload = format!(
+                                    "{{\"action\":\"partial\",\"utterance_id\":{}}}",
+                                    utterance_id
+                                );
+                                write.send(Message::Text(payload.into())).await
                             }
                             BackendCommand::Warmup { force } => {
                                 let payload = if force {
@@ -1379,6 +1402,7 @@ fn spawn_backend_worker(
                     let _ = keepalive_thread.join();
                 }
                 Err(error) => {
+                    PARTIAL_REQUEST_IN_FLIGHT.store(false, Ordering::SeqCst);
                     eprintln!("[vox-dictation] backend connect error: {error}");
                 }
             }

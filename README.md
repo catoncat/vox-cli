@@ -384,7 +384,7 @@ uv run vox dictation start --lang zh --model auto
 - 原生 macOS 前端，参考 `picc` 的 push-to-talk 体验
 - 默认监听右侧 `Command`：按下开始录音，松开提交当前语音段
 - 最终识别结果支持规则后处理与可选 LLM 润色
-- 默认只输出关键状态与错误；加 `--verbose` 可看 helper 详细日志
+- 默认只输出关键状态与错误；加 `--verbose` 会切到实时诊断视图，终端更易读，日志文件更完整
 - 首次运行会自动用 `cargo build --release` 编译 `native/vox-dictation`
 - 启动时会打印 helper 版本指纹，例如：`v0.1.0 (<git-hash>, build <timestamp>)`
 - 长时间空闲时 helper 会做周期 keep-warm；再次按键时也会立刻补一次 warmup，尽量把冷启动成本移出松键后的等待
@@ -396,7 +396,7 @@ uv run vox dictation start --lang zh --model auto
 - `--rebuild-native`：强制重编原生 helper
 - `--partial-interval-ms`：录音期间周期性请求 partial 结果
 - `--llm-timeout-sec`：本次运行临时覆盖 dictation LLM 超时
-- `--verbose`：打印 helper 详细排障日志
+- `--verbose`：显示实时诊断视图；详细原始日志写入 `dictation-session.log`，紧凑结构化事件写入 `dictation-session.agent.jsonl`
 
 推荐用法：
 
@@ -409,6 +409,7 @@ uv run vox dictation start --lang zh --rebuild-native --verbose
 # 更新全局命令后日常使用
 vox dictation --lang zh
 vox dictation start --lang zh
+vox dictation digest --json
 ```
 
 补充说明：
@@ -416,6 +417,11 @@ vox dictation start --lang zh
 - 语音段过短或过安静时会直接丢弃，不触发识别
 - 前置静音和长停顿会尽量在前端门控，减少无意义音频送入后端
 - 规则后处理和 LLM 润色只作用于最终结果，不改 partial
+- LLM 润色默认会请求流式响应；当前先用于更早拿到首 token 和更细的阶段日志，最终输入仍然在整段改写完成后一次性提交
+- `--verbose` 现在优先服务于“看懂这次发生了什么”：是否真流式、首字多久出来、慢在什么阶段，而不是把所有原始细节都刷在终端
+- 更啰嗦、可取证的细节继续留在 `~/.vox/logs/dictation-session.log`，适合事后排查
+- 给 Agent 分析的低 token 结构化事件写入 `~/.vox/logs/dictation-session.agent.jsonl`
+- `vox dictation digest --json` 会直接聚合最近窗口的 metrics、瓶颈分布、趋势、最慢样本和自动 diagnosis，适合先给 Agent 看
 - 启动时会打印 helper 版本指纹，方便确认不是旧二进制
 - 会话服务日志写入 `~/.vox/logs/dictation-session.log`；启动失败时会自动附在报错里
 
@@ -436,6 +442,13 @@ model = "openai/gpt-4o-mini"
 # 两种方式二选一
 # api_key = "sk-..."
 api_key_env = "OPENROUTER_API_KEY"
+stream = true
+
+# 内置预设：
+# - default: 平衡纠错
+# - deep_clean: 深度整理
+# - literal: 最小改动
+# - arena: 竞技场风格
 
 system_prompt = """
 你不是聊天助手，而是语音转写编辑器。
@@ -487,6 +500,7 @@ items = [
 - `provider` 只是标识名，真正决定接入的是 `base_url + model`
 - 只要兼容 OpenAI Chat Completions，都可以自定义：`OpenAI`、`OpenRouter`、`DashScope`、`Moonshot`、`SiliconFlow`，或自建 `LiteLLM / vLLM / OneAPI`
 - `api_key` 和 `api_key_env` 二选一；前者直接写配置，后者从环境变量读取
+- `stream = true` 时会按 OpenAI-compatible SSE 流式读取改写结果；如果你的网关只支持普通 JSON 返回，可以关掉
 - LLM 失败时会自动回退到规则后处理结果，不会中断 dictation
 - `dictation.context` 当前优先支持 `Ghostty` 和 Chromium 系浏览器；会在按下开始录音时先抓一次焦点上下文，再把结果注入 prompt
 - `dictation.context.capture_budget_ms` 用来限制上下文采集总预算；录音期间会尽量做完，松键后只会在剩余预算内再等一下，避免上下文拖慢最终出字
@@ -512,7 +526,7 @@ uv run vox dictation ui
 - 当前 GUI 只管理三块高频配置：`dictation.context`、`dictation.hotwords`、`dictation.hints`
 - 它会直接写回 `~/.vox/config.toml` 的这些 section，其他配置保持原样
 - 页面右侧可以直接预览当前焦点上下文和最近的 `dictation-session.log`
-- 保存完后，建议马上用 `uv run vox dictation start --lang zh --verbose` 跑一轮，终端彩色日志和文件日志都会显示当前配置是否生效
+- 保存完后，建议马上用 `uv run vox dictation start --lang zh --verbose` 跑一轮；终端会显示实时诊断视图，文件日志里会保留更完整的事件链和 summary
 
 <details>
 <summary>展开查看 dictation 排障日志关键字</summary>
@@ -544,8 +558,11 @@ uv run vox dictation --lang zh --rebuild-native --verbose
 - `[session-server] dictation_config_hints | text="..."`
 - `[session-server] dictation_stage | utterance_id=... | stage=hotwords_done | ...`
 - `[session-server] dictation_stage | utterance_id=... | stage=llm_start | ...`
+- `[session-server] dictation_stage | utterance_id=... | stage=llm_stream | stream_used=true | stream_chunks=... | first_token_ms=...`
 - `[session-server] dictation_postprocess | changed=... | llm_used=... | postprocess_ms=... | provider="..."`
 - `[session-server] dictation_postprocess_error | llm_error="..." | llm_ms=... | provider="..." | model="..."`
+- `[dictation] {"event":"utterance_summary", ...}`：整次 utterance 的 waterfall 摘要，适合快速 grep
+- `dictation-session.agent.jsonl`：紧凑 JSONL，短 key 稳定 schema，适合喂给 Agent 做时序和瓶颈分析
 
 当前版本默认不再打印每块音频 / 每次转写的后端调试日志。
 
@@ -690,6 +707,10 @@ uv run vox task cleanup --stale-running --delete-finished --older-than-hours 0 -
 │   ├── dictation-session.log.1
 │   ├── dictation-session.log.2
 │   ├── dictation-session.log.3
+│   ├── dictation-session.agent.jsonl
+│   ├── dictation-session.agent.jsonl.1
+│   ├── dictation-session.agent.jsonl.2
+│   ├── dictation-session.agent.jsonl.3
 │   ├── dictation.err.log
 │   └── dictation.log
 ├── locks/
@@ -707,6 +728,7 @@ Hugging Face 模型缓存默认不在 `~/.vox`，而在：
 dictation 日志默认会做大小轮转：
 
 - `dictation-session.log` 默认单文件上限 `5MB`
+- `dictation-session.agent.jsonl` 共用同一套轮转上限
 - 默认保留 `3` 份备份
 - 可在 `runtime.dictation_log_max_bytes` / `runtime.dictation_log_backups` 调整
 
@@ -818,7 +840,7 @@ HF_ENDPOINT=https://huggingface.co uv run vox model pull --model qwen-asr-1.7b-4
 - `[vox-dictation] backend error: ...`
 - `[vox-dictation] backend connect/read/write error: ...`
 
-如果需要更细的 helper 日志，重试：
+如果需要更细的终端诊断视图，重试：
 
 ```bash
 uv run vox dictation --lang zh --rebuild-native --verbose

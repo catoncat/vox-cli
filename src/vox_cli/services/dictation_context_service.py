@@ -47,9 +47,11 @@ class DictationContext:
     source: str
     app_name: str | None = None
     window_title: str | None = None
+    surface: str | None = None
     element_role: str | None = None
     element_title: str | None = None
     selected_text: str | None = None
+    focus_text: str | None = None
     page_url: str | None = None
     context_text: str | None = None
 
@@ -144,6 +146,10 @@ def _capture_ghostty_context(app_name: str, max_chars: int) -> DictationContext 
     if context is None:
         return None
     context.context_text = _sanitize_terminal_context(context.context_text, max_chars)
+    context.surface = _detect_terminal_surface(
+        window_title=context.window_title,
+        context_text=context.context_text,
+    )
     return context if context.to_dict() else None
 
 
@@ -158,15 +164,23 @@ def _capture_generic_ax_context(
     element_title = _clean_optional_text(_read_focused_attribute(app_name, 'AXTitle'))
     selected_text = _clean_optional_text(_read_focused_attribute(app_name, 'AXSelectedText'))
     element_value = _clean_optional_text(_read_focused_attribute(app_name, 'AXValue'))
-    context_text = _truncate_tail(element_value, max_chars)
+    focus_text = _truncate_tail(element_value, max_chars)
+    context_text = focus_text
 
     context = DictationContext(
         source=source,
         app_name=app_name,
         window_title=window_title,
+        surface=_detect_ax_surface(
+            source=source,
+            window_title=window_title,
+            element_role=element_role,
+            context_text=context_text,
+        ),
         element_role=element_role,
         element_title=element_title,
         selected_text=_truncate_tail(selected_text, max_chars),
+        focus_text=focus_text,
         context_text=context_text,
     )
     return context if context.to_dict() else None
@@ -212,6 +226,7 @@ def _capture_chromium_context(app_name: str, max_chars: int) -> DictationContext
         "title:document.title||'',"
         "selection:selection,"
         "isEditable:isEditable,"
+        "activeTag:active&&active.tagName?active.tagName:'',"
         "activeValue:activeValue,"
         "nearbyText:nearbyText.slice(-4000),"
         "mainText:mainText.slice(-4000),"
@@ -230,12 +245,22 @@ def _capture_chromium_context(app_name: str, max_chars: int) -> DictationContext
     payload = json.loads(dom_output or '{}')
     selected_text = _clean_optional_text(str(payload.get('selection') or ''))
     is_editable = bool(payload.get('isEditable'))
+    active_tag = _clean_optional_text(str(payload.get('activeTag') or ''))
     active_value = _clean_optional_text(str(payload.get('activeValue') or ''))
     nearby_text = _clean_optional_text(str(payload.get('nearbyText') or ''))
     main_text = _clean_optional_text(str(payload.get('mainText') or ''))
     body_text = _clean_optional_text(str(payload.get('bodyText') or ''))
+    surface = _detect_browser_surface(
+        page_url=page_url,
+        window_title=window_title or _clean_optional_text(str(payload.get('title') or '')),
+        is_editable=is_editable,
+        active_tag=active_tag,
+        nearby_text=nearby_text,
+        main_text=main_text,
+        body_text=body_text,
+    )
     page_context = _select_browser_context_text(
-        selected_text=selected_text,
+        surface=surface,
         active_value=active_value,
         nearby_text=nearby_text,
         main_text=main_text,
@@ -243,13 +268,18 @@ def _capture_chromium_context(app_name: str, max_chars: int) -> DictationContext
         is_editable=is_editable,
         max_chars=max_chars,
     )
+    focus_text = _truncate_tail(active_value, max_chars)
+    if focus_text == selected_text:
+        focus_text = None
 
     context = DictationContext(
         source='chromium',
         app_name=app_name,
         window_title=window_title or _clean_optional_text(str(payload.get('title') or '')),
+        surface=surface,
         page_url=page_url,
         selected_text=_truncate_tail(selected_text, max_chars),
+        focus_text=focus_text,
         context_text=page_context,
     )
     return context if context.to_dict() else None
@@ -309,6 +339,76 @@ def _truncate_tail(value: str | None, max_chars: int) -> str | None:
     return cleaned[-max_chars:]
 
 
+def _detect_terminal_surface(
+    *,
+    window_title: str | None,
+    context_text: str | None,
+) -> str:
+    title = (window_title or '').casefold()
+    content = (context_text or '').casefold()
+    if any(token in title for token in ('codex', 'claude', 'chatgpt', 'grok', 'cursor')):
+        return 'terminal_chat'
+    if any(token in content for token in ('codex', 'assistant', 'user', 'chat', '对话')):
+        return 'terminal_chat'
+    return 'terminal_editor'
+
+
+def _detect_ax_surface(
+    *,
+    source: str,
+    window_title: str | None,
+    element_role: str | None,
+    context_text: str | None,
+) -> str:
+    if source == 'ghostty':
+        return _detect_terminal_surface(window_title=window_title, context_text=context_text)
+    role = (element_role or '').casefold()
+    if role in {'axtextarea', 'axtextfield', 'axwebarea'}:
+        return 'ax_editor'
+    return 'ax_unknown'
+
+
+def _detect_browser_surface(
+    *,
+    page_url: str | None,
+    window_title: str | None,
+    is_editable: bool,
+    active_tag: str | None,
+    nearby_text: str | None,
+    main_text: str | None,
+    body_text: str | None,
+) -> str:
+    url = (page_url or '').casefold()
+    title = (window_title or '').casefold()
+    combined = ' '.join(part for part in (title, nearby_text, main_text, body_text) if part).casefold()
+    chat_markers = (
+        'chat',
+        'claude',
+        'chatgpt',
+        'grok',
+        'slack',
+        'discord',
+        'telegram',
+        'wechat',
+        'teams',
+        'messages',
+        '对话',
+        '聊天',
+    )
+    article_markers = ('docs', 'readme', 'guide', '文档', '文章', '博客', 'notion')
+    if any(marker in url for marker in chat_markers) or any(marker in title for marker in chat_markers):
+        return 'browser_chat'
+    if any(marker in combined for marker in ('assistant', 'user', 'reply', 'message', '消息')):
+        return 'browser_chat'
+    if any(marker in url for marker in article_markers) or any(marker in title for marker in article_markers):
+        return 'browser_article'
+    if is_editable or (active_tag or '').upper() in {'INPUT', 'TEXTAREA'}:
+        return 'browser_form'
+    if main_text or body_text:
+        return 'browser_article'
+    return 'browser_unknown'
+
+
 def _sanitize_terminal_context(value: str | None, max_chars: int) -> str | None:
     cleaned = _clean_optional_text(value)
     if cleaned is None:
@@ -319,8 +419,7 @@ def _sanitize_terminal_context(value: str | None, max_chars: int) -> str | None:
     if not useful_lines:
         return None
 
-    cjk_lines = [line for line in useful_lines if _contains_cjk(line)]
-    candidate_lines = cjk_lines or useful_lines
+    candidate_lines = useful_lines
 
     deduped_lines: list[str] = []
     for line in candidate_lines:
@@ -345,7 +444,7 @@ def _sanitize_terminal_context(value: str | None, max_chars: int) -> str | None:
 
 def _select_browser_context_text(
     *,
-    selected_text: str | None,
+    surface: str,
     active_value: str | None,
     nearby_text: str | None,
     main_text: str | None,
@@ -353,9 +452,7 @@ def _select_browser_context_text(
     is_editable: bool,
     max_chars: int,
 ) -> str | None:
-    if selected_text:
-        return _truncate_tail(selected_text, max_chars)
-
+    prefer_tail = surface == 'browser_chat'
     candidates: list[str | None] = []
     if is_editable:
         candidates.extend([nearby_text, main_text, body_text])
@@ -365,13 +462,13 @@ def _select_browser_context_text(
         candidates.append(active_value)
 
     for candidate in candidates:
-        sanitized = _sanitize_page_context(candidate, max_chars)
+        sanitized = _sanitize_page_context(candidate, max_chars, prefer_tail=prefer_tail)
         if sanitized:
             return sanitized
     return None
 
 
-def _sanitize_page_context(value: str | None, max_chars: int) -> str | None:
+def _sanitize_page_context(value: str | None, max_chars: int, *, prefer_tail: bool = False) -> str | None:
     cleaned = _clean_optional_text(value)
     if cleaned is None:
         return None
@@ -387,12 +484,15 @@ def _sanitize_page_context(value: str | None, max_chars: int) -> str | None:
             continue
         deduped_lines.append(line)
 
-    head_lines = deduped_lines[:6]
-    tail_lines = deduped_lines[-8:] if len(deduped_lines) > 6 else []
-    candidate_lines: list[str] = []
-    for line in [*head_lines, *tail_lines]:
-        if line not in candidate_lines:
-            candidate_lines.append(line)
+    if prefer_tail:
+        candidate_lines = deduped_lines[-10:]
+    else:
+        head_lines = deduped_lines[:6]
+        tail_lines = deduped_lines[-8:] if len(deduped_lines) > 6 else []
+        candidate_lines = []
+        for line in [*head_lines, *tail_lines]:
+            if line not in candidate_lines:
+                candidate_lines.append(line)
 
     selected: list[str] = []
     budget = max_chars

@@ -47,7 +47,7 @@ from .models import MODEL_REGISTRY
 from .runtime import RuntimeExecutionOptions
 from .services.asr_service import stream_to_ndjson, stream_transcribe_file, transcribe_file
 from .services.dictation_context_service import capture_dictation_context
-from .services.dictation_service import launch_dictation
+from .services.dictation_service import build_dictation_agent_digest, launch_dictation
 from .services.realtime_asr_service import run_realtime_session_server
 from .services.dictation_ui_service import launch_dictation_ui
 from .services.self_service import update_global_install
@@ -262,7 +262,7 @@ def dictation_cmd(
         None,
         '--partial-interval-ms',
         min=0,
-        help='Partial transcript interval in ms; defaults to 250ms when subtitle preview or partial typing is enabled',
+        help='Partial transcript interval in ms; defaults to 250ms for the live TUI session',
     ),
     type_partial: bool = typer.Option(
         False,
@@ -270,12 +270,16 @@ def dictation_cmd(
         help='Experimental: type partial transcripts into the focused input before the final text arrives',
     ),
     subtitle_overlay: bool = typer.Option(
-        False,
+        True,
         '--subtitle-overlay/--no-subtitle-overlay',
         help='Show live dictation subtitles in a bottom overlay while recording',
     ),
     llm_timeout_sec: float | None = typer.Option(None, '--llm-timeout-sec', min=0.1),
-    verbose: bool = typer.Option(False, '--verbose', help='Print verbose dictation helper logs'),
+    verbose: bool = typer.Option(
+        True,
+        '--verbose/--no-verbose',
+        help='Show the live dictation TUI; raw debug details are always written to dictation-session.log',
+    ),
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
@@ -307,7 +311,7 @@ def dictation_start_cmd(
         None,
         '--partial-interval-ms',
         min=0,
-        help='Partial transcript interval in ms; defaults to 250ms when subtitle preview or partial typing is enabled',
+        help='Partial transcript interval in ms; defaults to 250ms for the live TUI session',
     ),
     type_partial: bool = typer.Option(
         False,
@@ -315,12 +319,16 @@ def dictation_start_cmd(
         help='Experimental: type partial transcripts into the focused input before the final text arrives',
     ),
     subtitle_overlay: bool = typer.Option(
-        False,
+        True,
         '--subtitle-overlay/--no-subtitle-overlay',
         help='Show live dictation subtitles in a bottom overlay while recording',
     ),
     llm_timeout_sec: float | None = typer.Option(None, '--llm-timeout-sec', min=0.1),
-    verbose: bool = typer.Option(False, '--verbose', help='Print verbose dictation helper logs'),
+    verbose: bool = typer.Option(
+        True,
+        '--verbose/--no-verbose',
+        help='Show the live dictation TUI; raw debug details are always written to dictation-session.log',
+    ),
 ) -> None:
     state: AppState = ctx.obj
     _run_dictation_cmd(
@@ -389,6 +397,31 @@ def dictation_ui_cmd(
         )
     except Exception as e:
         _fail(str(e))
+
+
+@dictation_app.command('digest')
+def dictation_digest_cmd(
+    ctx: typer.Context,
+    utterances: int = typer.Option(20, '--utterances', min=1),
+    slowest: int = typer.Option(3, '--slowest', min=1),
+    errors: int = typer.Option(5, '--errors', min=0),
+    as_json: bool = typer.Option(True, '--json/--pretty'),
+) -> None:
+    state: AppState = ctx.obj
+    try:
+        payload = build_dictation_agent_digest(
+            state.config,
+            utterances=utterances,
+            slowest=slowest,
+            errors=errors,
+        )
+    except Exception as e:
+        _fail(str(e))
+
+    if as_json:
+        _print_json(payload)
+    else:
+        console.print(payload)
 
 
 @vmic_app.command('path')
