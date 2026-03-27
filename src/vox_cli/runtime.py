@@ -178,6 +178,26 @@ def read_runtime_lock_state(config: VoxConfig, resource: str) -> RuntimeLockStat
     return _read_lock_state(_lock_path(config, resource), resource)
 
 
+def probe_runtime_lock(config: VoxConfig, resource: str) -> tuple[bool, RuntimeLockState]:
+    lock_path = _lock_path(config, resource)
+    file_obj = lock_path.open('a+', encoding='utf-8')
+    locked = False
+    try:
+        try:
+            fcntl.flock(file_obj.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except BlockingIOError:
+            return (True, _read_lock_state(lock_path, resource))
+        return (False, _read_lock_state(lock_path, resource))
+    finally:
+        if locked:
+            try:
+                fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+        file_obj.close()
+
+
 @contextmanager
 def acquire_runtime_lock_pool(
     config: VoxConfig,
@@ -271,6 +291,7 @@ def acquire_runtime_lock(
     locks_dir.mkdir(parents=True, exist_ok=True)
     lock_path = locks_dir / _lock_filename(resource)
     file_obj = lock_path.open('a+', encoding='utf-8')
+    locked = False
 
     started = time.monotonic()
     last_logged = -_WAIT_LOG_INTERVAL_SEC
@@ -279,6 +300,7 @@ def acquire_runtime_lock(
         while True:
             try:
                 fcntl.flock(file_obj.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
                 break
             except BlockingIOError:
                 state = _read_lock_state(lock_path, resource)
@@ -310,12 +332,13 @@ def acquire_runtime_lock(
             options.log(f'[green]Acquired {resource}[/green] after {waited:.1f}s wait')
         yield RuntimeLockHandle(resource=resource, path=lock_path, file_obj=file_obj)
     finally:
-        try:
-            _clear_lock_state(file_obj)
-        except Exception:
-            pass
-        try:
-            fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
+        if locked:
+            try:
+                _clear_lock_state(file_obj)
+            except Exception:
+                pass
+            try:
+                fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
         file_obj.close()

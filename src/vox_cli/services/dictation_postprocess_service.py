@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from ..config import (
     DictationHintsConfig,
@@ -270,27 +271,8 @@ def _extract_chat_message_content(payload: dict[str, Any]) -> str:
 _DIFF_TOKEN_RE = re.compile(r'[A-Za-z0-9_]+|\s+|.', re.UNICODE)
 _LLM_STREAM_LOG_INTERVAL_MS = 250
 _LLM_STREAM_PREVIEW_CHARS = 160
-_LLM_GUARD_REPLY_PREFIXES = (
-    '当然',
-    '当然可以',
-    '好的',
-    '好的，',
-    '好的。',
-    '没问题',
-    '可以的',
-    '以下是',
-    '这里是',
-    '让我',
-    '抱歉',
-)
-_LLM_GUARD_PROMPT_LEAK_MARKERS = (
-    '当前输入环境:',
-    '当前主界面:',
-    '最近内容:',
-    '当前选中/焦点文本:',
-    '说话人纠错提示:',
-    '热词与优先写法:',
-)
+_LOCAL_LLM_HOSTS = {'127.0.0.1', '0.0.0.0', 'localhost', '::1'}
+_THINK_BLOCK_RE = re.compile(r'<think>[\s\S]*?</think>\s*', re.IGNORECASE)
 
 
 def build_text_diff(before: str, after: str) -> str:
@@ -383,45 +365,46 @@ def _preview_stream_text(text: str, *, max_chars: int = _LLM_STREAM_PREVIEW_CHAR
     return f'...{stripped[-max_chars:]}'
 
 
-def _looks_like_structured_output(text: str) -> bool:
+def _strip_think_blocks(text: str) -> str:
+    stripped = _THINK_BLOCK_RE.sub('', text)
+    return stripped.strip()
+
+
+def _strip_prompt_echo_wrappers(text: str) -> str:
     stripped = text.strip()
-    if not stripped:
+    wrappers = (
+        ('<<<', '>>>'),
+        ('[[[', ']]]'),
+    )
+    while stripped:
+        next_value = stripped
+        for prefix, suffix in wrappers:
+            if next_value.startswith(prefix) and next_value.endswith(suffix):
+                inner = next_value[len(prefix) : len(next_value) - len(suffix)].strip()
+                if inner:
+                    next_value = inner
+                    break
+        if next_value == stripped:
+            break
+        stripped = next_value
+    return stripped
+
+
+def _normalize_llm_output(text: str) -> str:
+    return _strip_prompt_echo_wrappers(_strip_think_blocks(text))
+
+
+def _llm_uses_local_endpoint(config: DictationLLMConfig) -> bool:
+    provider = config.provider.strip().lower()
+    if provider == 'local-mlx':
         return True
-    if '```' in stripped:
-        return True
-    if re.search(r'^\s*(?:[-*]|\d+\.)\s+\S+', stripped, re.MULTILINE):
-        return True
-    if (stripped.startswith('{') and stripped.endswith('}')) or (stripped.startswith('[') and stripped.endswith(']')):
-        return True
-    if re.search(r'^#{1,6}\s+\S+', stripped, re.MULTILINE):
-        return True
-    return False
-
-
-def _llm_guard_reason(input_text: str, output_text: str) -> str | None:
-    normalized_input = input_text.strip()
-    normalized_output = output_text.strip()
-    if not normalized_output:
-        return 'empty_output'
-
-    if any(marker in normalized_output for marker in _LLM_GUARD_PROMPT_LEAK_MARKERS):
-        return 'prompt_leak'
-
-    output_lines = [line.strip() for line in normalized_output.splitlines() if line.strip()]
-    if len(output_lines) > 1:
-        return 'multiline_output'
-
-    if _looks_like_structured_output(normalized_output):
-        return 'structured_output'
-
-    for prefix in _LLM_GUARD_REPLY_PREFIXES:
-        if normalized_output.startswith(prefix) and not normalized_input.startswith(prefix):
-            return 'reply_prefix'
-
-    if len(normalized_input) <= 120 and len(normalized_output) >= len(normalized_input) + max(32, len(normalized_input) * 2):
-        return 'abnormal_expansion'
-
-    return None
+    if not config.base_url:
+        return False
+    try:
+        hostname = (urlparse(config.base_url).hostname or '').strip().lower()
+    except ValueError:
+        return False
+    return hostname in _LOCAL_LLM_HOSTS or hostname.endswith('.localhost')
 
 
 class DictationTextPostprocessor:
@@ -549,7 +532,7 @@ class DictationTextPostprocessor:
                     context=context,
                     emit=lambda stage, fields: emit_stage(stage, **fields),
                 )
-                llm_output = llm_result.text
+                llm_output = _normalize_llm_output(llm_result.text)
                 llm_elapsed_ms = int((time.perf_counter() - llm_started_at) * 1000)
                 metadata['llm_used'] = True
                 metadata['llm_ms'] = llm_elapsed_ms
@@ -574,19 +557,7 @@ class DictationTextPostprocessor:
                     diff=build_text_diff(llm_input, llm_output),
                 )
                 if llm_output:
-                    if (guard_reason := _llm_guard_reason(llm_input, llm_output)) is not None:
-                        metadata['llm_guard_fallback'] = True
-                        metadata['llm_guard_reason'] = guard_reason
-                        emit_stage(
-                            'llm_guard',
-                            reason=guard_reason,
-                            fallback='pre_llm',
-                            text=llm_input,
-                            chars=len(llm_input),
-                        )
-                        result = llm_input
-                    else:
-                        result = llm_output
+                    result = llm_output
             except Exception as error:
                 metadata['llm_ms'] = int((time.perf_counter() - llm_started_at) * 1000)
                 metadata['llm_error'] = str(error)
@@ -658,7 +629,7 @@ class DictationTextPostprocessor:
         api_key = llm.api_key
         if api_key is None and llm.api_key_env:
             api_key = os.getenv(llm.api_key_env)
-            if not api_key:
+            if not api_key and not _llm_uses_local_endpoint(llm):
                 raise RuntimeError(f'{llm.api_key_env} is not set')
 
         rendered_user_prompt = self._render_user_prompt(

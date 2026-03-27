@@ -30,7 +30,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.sdist]
 include = [
   "src/vox_cli",
-  "native/vox-dictation",
+  "native/vox-dictation/Cargo.toml",
+  "native/vox-dictation/Cargo.lock",
+  "native/vox-dictation/build.rs",
+  "native/vox-dictation/src",
   "README.md",
   "config.example.toml",
 ]
@@ -39,7 +42,10 @@ include = [
 packages = ["src/vox_cli"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"native/vox-dictation" = "vox_cli/native/vox-dictation"
+"native/vox-dictation/Cargo.toml" = "vox_cli/native/vox-dictation/Cargo.toml"
+"native/vox-dictation/Cargo.lock" = "vox_cli/native/vox-dictation/Cargo.lock"
+"native/vox-dictation/build.rs" = "vox_cli/native/vox-dictation/build.rs"
+"native/vox-dictation/src" = "vox_cli/native/vox-dictation/src"
 
 [tool.uv]
 prerelease = "allow"

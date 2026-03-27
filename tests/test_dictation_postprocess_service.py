@@ -247,6 +247,51 @@ def test_postprocessor_uses_deep_clean_preset(monkeypatch) -> None:
     assert result.text == 'Refined output'
 
 
+def test_postprocessor_uses_spoken_clean_preset(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout):
+        captured['body'] = json.loads(request.data.decode('utf-8'))
+        return _FakeHTTPResponse(
+            {
+                'choices': [
+                    {
+                        'message': {
+                            'content': 'Refined output',
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setenv('OPENAI_API_KEY', 'sk-test')
+    monkeypatch.setattr(
+        'vox_cli.services.dictation_postprocess_service.urllib.request.urlopen',
+        fake_urlopen,
+    )
+
+    config = VoxConfig(
+        dictation=DictationConfig(
+            llm=DictationLLMConfig(
+                enabled=True,
+                provider='openai-compatible',
+                base_url='https://api.openai.com/v1',
+                model='gpt-4o-mini',
+                api_key_env='OPENAI_API_KEY',
+                prompt_preset='spoken_clean',
+            ),
+        )
+    )
+
+    result = DictationTextPostprocessor(config).process('嗯这个这个功能吧, 就是说, 用起来怎么样', language='zh')
+
+    body = captured['body']
+    assert '删除语气词' in body['messages'][0]['content']
+    assert '示例5' in body['messages'][1]['content']
+    assert 'Codex' in body['messages'][1]['content']
+    assert result.text == 'Refined output'
+
+
 def test_postprocessor_default_preset_is_dictation_safe(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -330,6 +375,112 @@ def test_postprocessor_supports_api_key_from_config(monkeypatch) -> None:
     assert headers['authorization'] == 'Bearer sk-inline'
     assert result.text == 'Refined output'
     assert result.metadata['llm_stream_requested'] is True
+
+
+def test_postprocessor_allows_missing_api_key_for_loopback_base_url(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout):
+        captured['headers'] = {k.lower(): v for k, v in request.header_items()}
+        return _FakeHTTPResponse(
+            {
+                'choices': [
+                    {
+                        'message': {
+                            'content': 'Refined output',
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    monkeypatch.setattr(
+        'vox_cli.services.dictation_postprocess_service.urllib.request.urlopen',
+        fake_urlopen,
+    )
+
+    config = VoxConfig(
+        dictation=DictationConfig(
+            llm=DictationLLMConfig(
+                enabled=True,
+                provider='openai-compatible',
+                base_url='http://127.0.0.1:18080/v1',
+                model='Qwen/Qwen3-1.7B-MLX-4bit',
+                api_key_env='OPENAI_API_KEY',
+            ),
+        )
+    )
+
+    result = DictationTextPostprocessor(config).process('你好 world')
+
+    headers = captured['headers']
+    assert 'authorization' not in headers
+    assert result.text == 'Refined output'
+
+
+def test_postprocessor_allows_missing_api_key_for_local_mlx_provider(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout):
+        captured['headers'] = {k.lower(): v for k, v in request.header_items()}
+        return _FakeHTTPResponse(
+            {
+                'choices': [
+                    {
+                        'message': {
+                            'content': 'Refined output',
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    monkeypatch.setattr(
+        'vox_cli.services.dictation_postprocess_service.urllib.request.urlopen',
+        fake_urlopen,
+    )
+
+    config = VoxConfig(
+        dictation=DictationConfig(
+            llm=DictationLLMConfig(
+                enabled=True,
+                provider='local-mlx',
+                base_url='http://mac-studio.local:18080/v1',
+                model='Qwen/Qwen3-1.7B-MLX-4bit',
+                api_key_env='OPENAI_API_KEY',
+            ),
+        )
+    )
+
+    result = DictationTextPostprocessor(config).process('你好 world')
+
+    headers = captured['headers']
+    assert 'authorization' not in headers
+    assert result.text == 'Refined output'
+
+
+def test_postprocessor_requires_api_key_for_remote_compatible_provider(monkeypatch) -> None:
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+
+    config = VoxConfig(
+        dictation=DictationConfig(
+            llm=DictationLLMConfig(
+                enabled=True,
+                provider='openai-compatible',
+                base_url='https://api.openai.com/v1',
+                model='gpt-4o-mini',
+                api_key_env='OPENAI_API_KEY',
+            ),
+        )
+    )
+
+    result = DictationTextPostprocessor(config).process('你好 world')
+
+    assert result.text == '你好 world'
+    assert result.metadata['llm_used'] is False
+    assert result.metadata['llm_error'] == 'OPENAI_API_KEY is not set'
 
 
 def test_postprocessor_feeds_raw_asr_text_to_llm_then_applies_rules(monkeypatch) -> None:
@@ -593,6 +744,88 @@ def test_postprocessor_streams_llm_chunks_and_emits_progress(monkeypatch) -> Non
     assert result.metadata['llm_stream_chunks'] == 2
     assert result.metadata['llm_first_token_ms'] is not None
     assert 'llm_stream' in stages
+
+
+def test_postprocessor_strips_think_blocks_from_llm_output(monkeypatch) -> None:
+    def fake_urlopen(request, timeout):
+        return _FakeHTTPResponse(
+            {
+                'choices': [
+                    {
+                        'message': {
+                            'content': '<think>先想一下</think>\n\n你好，world。',
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    monkeypatch.setattr(
+        'vox_cli.services.dictation_postprocess_service.urllib.request.urlopen',
+        fake_urlopen,
+    )
+
+    config = VoxConfig(
+        dictation=DictationConfig(
+            llm=DictationLLMConfig(
+                enabled=True,
+                provider='local-mlx',
+                base_url='http://127.0.0.1:18080/v1',
+                model='Qwen/Qwen3-1.7B-MLX-4bit',
+                api_key_env='OPENAI_API_KEY',
+                user_prompt_template='TEXT={text}',
+            ),
+        )
+    )
+
+    result = DictationTextPostprocessor(config).process('你好，world。')
+
+    assert result.text == '你好，world。'
+    assert result.metadata['llm_used'] is True
+    assert result.metadata['llm_output_text'] == '你好，world。'
+    assert result.metadata['llm_guard_fallback'] is False
+
+
+def test_postprocessor_strips_prompt_echo_wrappers_from_llm_output(monkeypatch) -> None:
+    def fake_urlopen(request, timeout):
+        return _FakeHTTPResponse(
+            {
+                'choices': [
+                    {
+                        'message': {
+                            'content': '<<<\n把这个功能先发到测试环境，没问题再发到正式环境。\n>>>',
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    monkeypatch.setattr(
+        'vox_cli.services.dictation_postprocess_service.urllib.request.urlopen',
+        fake_urlopen,
+    )
+
+    config = VoxConfig(
+        dictation=DictationConfig(
+            llm=DictationLLMConfig(
+                enabled=True,
+                provider='local-mlx',
+                base_url='http://127.0.0.1:18080/v1',
+                model='mlx-community/Qwen2.5-1.5B-Instruct-4bit',
+                api_key_env='OPENAI_API_KEY',
+                user_prompt_template='TEXT={text}',
+            ),
+        )
+    )
+
+    result = DictationTextPostprocessor(config).process('把这个功能先发测试环境 没问题再发正式')
+
+    assert result.text == '把这个功能先发到测试环境，没问题再发到正式环境。'
+    assert result.metadata['llm_used'] is True
+    assert result.metadata['llm_output_text'] == '把这个功能先发到测试环境，没问题再发到正式环境。'
+    assert result.metadata['llm_guard_fallback'] is False
 
 
 def test_postprocessor_falls_back_to_rules_when_llm_fails(monkeypatch) -> None:

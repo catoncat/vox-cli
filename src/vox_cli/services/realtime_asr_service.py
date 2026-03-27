@@ -741,9 +741,6 @@ def _apply_dictation_postprocess(
         timings['context_surface'] = context.surface
     timings['commit_mode'] = commit_mode
     timings['commit_reused_chars'] = int(commit_reused_chars)
-    timings['llm_guard_fallback'] = bool(result.metadata.get('llm_guard_fallback'))
-    if result.metadata.get('llm_guard_reason'):
-        timings['llm_guard_reason'] = str(result.metadata.get('llm_guard_reason'))
 
     _log_session(
         'dictation_commit',
@@ -751,8 +748,6 @@ def _apply_dictation_postprocess(
         commit_mode=commit_mode,
         reused_chars=commit_reused_chars,
         llm_used=bool(result.metadata.get('llm_used')),
-        guard_fallback=bool(result.metadata.get('llm_guard_fallback')),
-        guard_reason=result.metadata.get('llm_guard_reason'),
     )
 
     if result.metadata.get('llm_error'):
@@ -790,8 +785,6 @@ def _apply_dictation_postprocess(
         hint_count=int(result.metadata.get('hint_count', 0)),
         commit_mode=commit_mode,
         reused_chars=commit_reused_chars,
-        guard_fallback=bool(result.metadata.get('llm_guard_fallback')),
-        guard_reason=result.metadata.get('llm_guard_reason'),
     )
 
     return RealtimeTranscript(

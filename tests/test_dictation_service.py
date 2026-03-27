@@ -5,8 +5,11 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from vox_cli.config import RuntimeConfig, VoxConfig
 from vox_cli.services import dictation_service
+from vox_cli.runtime import RuntimeLockState
 
 
 class _FakeProc:
@@ -1029,7 +1032,7 @@ def test_launch_dictation_prepares_model_before_start(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(
         dictation_service,
         'ensure_native_binary',
-        lambda rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
+        lambda config=None, rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
     )
     monkeypatch.setattr(dictation_service, 'pick_free_port', lambda host='127.0.0.1': 8765)
     monkeypatch.setattr(dictation_service, 'resolve_model', lambda config, model_id, kind=None: type('Spec', (), {'model_id': model_id, 'repo_id': 'repo', 'kind': 'asr'})())
@@ -1073,13 +1076,66 @@ def test_launch_dictation_prepares_model_before_start(monkeypatch, tmp_path: Pat
     assert '--verbose' in popen_calls[1]
 
 
+def test_launch_dictation_fails_fast_when_asr_runtime_is_busy(monkeypatch, tmp_path: Path) -> None:
+    config = VoxConfig(runtime=RuntimeConfig(home_dir=str(tmp_path)))
+    state = RuntimeLockState(
+        resource='asr_infer',
+        pid=4321,
+        task_type='asr_session_server',
+        command_summary='asr session-server --model qwen-asr-0.6b-4bit',
+        started_at='2026-03-25T00:00:00+00:00',
+        metadata={'model_id': 'qwen-asr-0.6b-4bit', 'out': '127.0.0.1:49554'},
+    )
+
+    def _unexpected(*args, **kwargs):
+        raise AssertionError('should fail before starting helper or downloading model')
+
+    monkeypatch.setattr(dictation_service, 'probe_runtime_lock', lambda config, resource: (True, state))
+    monkeypatch.setattr(dictation_service, '_process_exists', lambda pid: True)
+    monkeypatch.setattr(dictation_service, 'ensure_native_binary', _unexpected)
+    monkeypatch.setattr(dictation_service, 'ensure_model_downloaded', _unexpected)
+
+    with pytest.raises(RuntimeError) as error:
+        dictation_service.launch_dictation(
+            config=config,
+            lang='zh',
+            model='auto',
+        )
+
+    message = str(error.value)
+    assert '仍在占用 dictation backend' in message
+    assert '127.0.0.1:49554' in message
+    assert 'kill 4321' in message
+
+
+def test_build_dictation_runtime_busy_message_falls_back_to_process_scan(monkeypatch) -> None:
+    state = RuntimeLockState(resource='asr_infer')
+
+    monkeypatch.setattr(
+        dictation_service,
+        '_find_running_asr_session_servers',
+        lambda limit=3: [
+            (2296, '/Users/envvar/.local/share/uv/tools/vox-cli/bin/python3 -u -m vox_cli.main asr session-server --host 127.0.0.1 --port 49554')
+        ][:limit],
+    )
+
+    message = dictation_service._build_dictation_runtime_busy_message(
+        state,
+        requested_model='qwen-asr-0.6b-4bit',
+    )
+
+    assert '当前占用者: unknown holder' in message
+    assert '后台 session-server: pid=2296' in message
+    assert 'kill 2296' in message
+
+
 def test_launch_dictation_enables_partial_streaming_in_verbose(monkeypatch, tmp_path: Path) -> None:
     config = VoxConfig(runtime=RuntimeConfig(home_dir=str(tmp_path)))
 
     monkeypatch.setattr(
         dictation_service,
         'ensure_native_binary',
-        lambda rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
+        lambda config=None, rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
     )
     monkeypatch.setattr(dictation_service, 'pick_free_port', lambda host='127.0.0.1': 8765)
     monkeypatch.setattr(dictation_service, 'resolve_model', lambda config, model_id, kind=None: type('Spec', (), {'model_id': model_id, 'repo_id': 'repo', 'kind': 'asr'})())
@@ -1128,7 +1184,7 @@ def test_launch_dictation_keeps_background_partial_streaming_disabled_when_llm_e
     monkeypatch.setattr(
         dictation_service,
         'ensure_native_binary',
-        lambda rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
+        lambda config=None, rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
     )
     monkeypatch.setattr(dictation_service, 'pick_free_port', lambda host='127.0.0.1': 8765)
     monkeypatch.setattr(dictation_service, 'resolve_model', lambda config, model_id, kind=None: type('Spec', (), {'model_id': model_id, 'repo_id': 'repo', 'kind': 'asr'})())
@@ -1171,7 +1227,7 @@ def test_launch_dictation_enables_partial_streaming_by_default_when_subtitle_ove
     monkeypatch.setattr(
         dictation_service,
         'ensure_native_binary',
-        lambda rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
+        lambda config=None, rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
     )
     monkeypatch.setattr(dictation_service, 'pick_free_port', lambda host='127.0.0.1': 8765)
     monkeypatch.setattr(dictation_service, 'resolve_model', lambda config, model_id, kind=None: type('Spec', (), {'model_id': model_id, 'repo_id': 'repo', 'kind': 'asr'})())
@@ -1216,7 +1272,7 @@ def test_launch_dictation_passes_llm_timeout_override_to_server(monkeypatch, tmp
     monkeypatch.setattr(
         dictation_service,
         'ensure_native_binary',
-        lambda rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
+        lambda config=None, rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
     )
     monkeypatch.setattr(dictation_service, 'pick_free_port', lambda host='127.0.0.1': 8765)
     monkeypatch.setattr(dictation_service, 'resolve_model', lambda config, model_id, kind=None: type('Spec', (), {'model_id': model_id, 'repo_id': 'repo', 'kind': 'asr'})())
@@ -1263,7 +1319,7 @@ def test_launch_dictation_passes_type_partial_to_helper(monkeypatch, tmp_path: P
     monkeypatch.setattr(
         dictation_service,
         'ensure_native_binary',
-        lambda rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
+        lambda config=None, rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
     )
     monkeypatch.setattr(dictation_service, 'pick_free_port', lambda host='127.0.0.1': 8765)
     monkeypatch.setattr(dictation_service, 'resolve_model', lambda config, model_id, kind=None: type('Spec', (), {'model_id': model_id, 'repo_id': 'repo', 'kind': 'asr'})())
@@ -1306,7 +1362,7 @@ def test_launch_dictation_passes_subtitle_overlay_to_helper_when_enabled(monkeyp
     monkeypatch.setattr(
         dictation_service,
         'ensure_native_binary',
-        lambda rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
+        lambda config=None, rebuild=False, required_flags=(): tmp_path / 'vox-dictation',
     )
     monkeypatch.setattr(dictation_service, 'pick_free_port', lambda host='127.0.0.1': 8765)
     monkeypatch.setattr(dictation_service, 'resolve_model', lambda config, model_id, kind=None: type('Spec', (), {'model_id': model_id, 'repo_id': 'repo', 'kind': 'asr'})())
@@ -1375,21 +1431,27 @@ def test_ensure_native_binary_rebuilds_when_sources_are_newer(monkeypatch, tmp_p
     os.utime(build_rs, (200, 200))
     os.utime(source, (200, 200))
 
-    calls: list[list[str]] = []
+    calls: list[dict[str, object]] = []
     monkeypatch.setattr(dictation_service, 'native_project_dir', lambda: project_dir)
     monkeypatch.setattr(dictation_service, 'native_manifest_path', lambda: manifest)
-    monkeypatch.setattr(dictation_service, 'native_binary_path', lambda: binary)
+    monkeypatch.setattr(dictation_service, 'native_binary_path', lambda config=None: binary)
     monkeypatch.setattr(dictation_service.shutil, 'which', lambda name: '/usr/bin/cargo')
     monkeypatch.setattr(
         dictation_service.subprocess,
         'run',
-        lambda cmd, cwd, check: calls.append(cmd),
+        lambda cmd, cwd, check, env: calls.append({'cmd': cmd, 'cwd': cwd, 'env': env}),
     )
 
     result = dictation_service.ensure_native_binary()
 
     assert result == binary
-    assert calls == [['/usr/bin/cargo', 'build', '--release', '--manifest-path', str(manifest)]]
+    assert calls == [
+        {
+            'cmd': ['/usr/bin/cargo', 'build', '--release', '--manifest-path', str(manifest)],
+            'cwd': project_dir,
+            'env': {**os.environ, 'CARGO_TARGET_DIR': str(project_dir / 'target')},
+        }
+    ]
 
 
 def test_ensure_native_binary_rebuilds_when_required_flag_missing(monkeypatch, tmp_path: Path) -> None:
@@ -1414,10 +1476,10 @@ def test_ensure_native_binary_rebuilds_when_required_flag_missing(monkeypatch, t
     os.utime(build_rs, (100, 100))
     os.utime(source, (100, 100))
 
-    calls: list[list[str]] = []
+    calls: list[dict[str, object]] = []
     monkeypatch.setattr(dictation_service, 'native_project_dir', lambda: project_dir)
     monkeypatch.setattr(dictation_service, 'native_manifest_path', lambda: manifest)
-    monkeypatch.setattr(dictation_service, 'native_binary_path', lambda: binary)
+    monkeypatch.setattr(dictation_service, 'native_binary_path', lambda config=None: binary)
     monkeypatch.setattr(dictation_service.shutil, 'which', lambda name: '/usr/bin/cargo')
     monkeypatch.setattr(
         dictation_service.subprocess,
@@ -1427,10 +1489,27 @@ def test_ensure_native_binary_rebuilds_when_required_flag_missing(monkeypatch, t
     monkeypatch.setattr(
         dictation_service.subprocess,
         'run',
-        lambda cmd, cwd, check: calls.append(cmd),
+        lambda cmd, cwd, check, env: calls.append({'cmd': cmd, 'cwd': cwd, 'env': env}),
     )
 
     result = dictation_service.ensure_native_binary(required_flags=('--subtitle-overlay',))
 
     assert result == binary
-    assert calls == [['/usr/bin/cargo', 'build', '--release', '--manifest-path', str(manifest)]]
+    assert calls == [
+        {
+            'cmd': ['/usr/bin/cargo', 'build', '--release', '--manifest-path', str(manifest)],
+            'cwd': project_dir,
+            'env': {**os.environ, 'CARGO_TARGET_DIR': str(project_dir / 'target')},
+        }
+    ]
+
+
+def test_native_target_dir_uses_runtime_cache_for_packaged_install(monkeypatch, tmp_path: Path) -> None:
+    config = VoxConfig(runtime=RuntimeConfig(home_dir=str(tmp_path / '.vox')))
+    packaged_project_dir = tmp_path / 'lib' / 'python3.13' / 'site-packages' / 'vox_cli' / 'native' / 'vox-dictation'
+
+    monkeypatch.setattr(dictation_service, 'native_project_dir', lambda: packaged_project_dir)
+
+    result = dictation_service.native_target_dir(config)
+
+    assert result == tmp_path / '.vox' / 'cache' / 'native' / 'vox-dictation' / 'target'

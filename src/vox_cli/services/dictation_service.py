@@ -21,7 +21,8 @@ import uuid
 
 import websockets
 
-from ..config import VoxConfig, get_home_dir, resolve_dictation_model_id
+from ..config import VoxConfig, get_cache_dir, get_home_dir, resolve_dictation_model_id
+from ..runtime import format_lock_state, probe_runtime_lock
 from .model_service import ensure_model_downloaded, resolve_model
 
 
@@ -41,8 +42,26 @@ def native_manifest_path() -> Path:
     return native_project_dir() / 'Cargo.toml'
 
 
-def native_binary_path() -> Path:
-    return native_project_dir() / 'target' / 'release' / 'vox-dictation'
+def _is_packaged_native_project(project_dir: Path | None = None) -> bool:
+    parts = (project_dir or native_project_dir()).parts
+    return 'site-packages' in parts or 'dist-packages' in parts
+
+
+def _default_native_cache_root() -> Path:
+    home_dir = Path(os.getenv('VOX_HOME', '~/.vox')).expanduser().resolve()
+    return home_dir / 'cache'
+
+
+def native_target_dir(config: VoxConfig | None = None) -> Path:
+    project_dir = native_project_dir()
+    if not _is_packaged_native_project(project_dir):
+        return project_dir / 'target'
+    cache_root = get_cache_dir(config) if config is not None else _default_native_cache_root()
+    return cache_root / 'native' / 'vox-dictation' / 'target'
+
+
+def native_binary_path(config: VoxConfig | None = None) -> Path:
+    return native_target_dir(config) / 'release' / 'vox-dictation'
 
 
 def dictation_logs_dir(config: VoxConfig) -> Path:
@@ -588,7 +607,6 @@ class _DictationLogFormatter:
         'llm_start': ('LLM', '1;35', '开始润色'),
         'llm_stream': ('LLM', '1;35', '流式润色'),
         'llm_done': ('LLM', '1;35', '润色完成'),
-        'llm_guard': ('GUARD', '1;33', '结构护栏回退'),
         'llm_error': ('LLM', '1;31', '润色失败'),
         'final_ready': ('DONE', '1;32', '最终输出'),
     }
@@ -1832,13 +1850,97 @@ def wait_for_session_server(
     )
 
 
+def _process_exists(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _find_running_asr_session_servers(limit: int = 3) -> list[tuple[int, str]]:
+    try:
+        output = subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True, timeout=2)
+    except Exception:
+        return []
+
+    matches: list[tuple[int, str]] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        pid_text, _, command = line.partition(' ')
+        if not pid_text.isdigit():
+            continue
+        command = command.strip()
+        if ' asr session-server ' not in f' {command} ' and 'vox_cli.main asr session-server' not in command:
+            continue
+        matches.append((int(pid_text), command))
+        if len(matches) >= limit:
+            break
+    return matches
+
+
+def _build_dictation_runtime_busy_message(state, *, requested_model: str) -> str:
+    detail = format_lock_state(state)
+    lines = [
+        '另一个 ASR 会话仍在占用 dictation backend，这次启动不会再继续傻等到超时。',
+    ]
+    if detail != 'unknown holder':
+        lines.append(f'当前占用者: {detail}')
+    else:
+        lines.append('当前占用者: unknown holder')
+        for pid, command in _find_running_asr_session_servers():
+            lines.append(f'后台 session-server: pid={pid} cmd={command}')
+
+    out = state.metadata.get('out')
+    if out:
+        lines.append(f'现有会话地址: {out}')
+
+    holder_model = state.metadata.get('model_id')
+    if holder_model and holder_model != requested_model:
+        lines.append(f'现有模型: {holder_model}；本次请求: {requested_model}')
+
+    command_summary = state.command_summary or ''
+    if state.task_type == 'asr_session_server' or 'asr session-server' in command_summary:
+        lines.append('看起来是之前的 dictation / session-server 还在后台运行。')
+    else:
+        lines.append('看起来是另一条 ASR 任务还没结束。')
+
+    if state.pid and _process_exists(state.pid):
+        lines.append(f'如果这是遗留会话，可先执行: kill {state.pid}')
+    else:
+        candidates = _find_running_asr_session_servers(limit=1)
+        if candidates:
+            lines.append(f'如果这是遗留会话，可先执行: kill {candidates[0][0]}')
+        else:
+            lines.append(
+                '如果旧会话其实已经退出，只剩脏任务记录，再执行: '
+                'uv run vox task cleanup --stale-running --older-than-hours 0 --json'
+            )
+    return '\n'.join(lines)
+
+
+def _ensure_asr_runtime_available_for_dictation(config: VoxConfig, *, requested_model: str) -> None:
+    busy, state = probe_runtime_lock(config, 'asr_infer')
+    if not busy:
+        return
+    raise RuntimeError(_build_dictation_runtime_busy_message(state, requested_model=requested_model))
+
+
 def ensure_native_binary(
+    config: VoxConfig | None = None,
     *,
     rebuild: bool = False,
     required_flags: tuple[str, ...] = (),
 ) -> Path:
     manifest = native_manifest_path()
-    binary = native_binary_path()
+    target_dir = native_target_dir(config)
+    binary = native_binary_path(config)
 
     if not manifest.exists():
         raise RuntimeError(f'Native dictation manifest not found: {manifest}')
@@ -1847,10 +1949,14 @@ def ensure_native_binary(
         cargo = shutil.which('cargo')
         if not cargo:
             raise RuntimeError('`cargo` not found; install Rust toolchain first')
+        target_dir.mkdir(parents=True, exist_ok=True)
+        cargo_env = os.environ.copy()
+        cargo_env['CARGO_TARGET_DIR'] = str(target_dir)
         subprocess.run(
             [cargo, 'build', '--release', '--manifest-path', str(manifest)],
             cwd=native_project_dir(),
             check=True,
+            env=cargo_env,
         )
 
     if not binary.exists():
@@ -2467,12 +2573,14 @@ def launch_dictation(
 ) -> int:
     resolved_model = resolve_dictation_model_id(config, None if model == 'auto' else model)
     spec = resolve_model(config, resolved_model, kind='asr')
+    _ensure_asr_runtime_available_for_dictation(config, requested_model=resolved_model)
     required_helper_flags: list[str] = []
     if type_partial:
         required_helper_flags.append('--type-partial')
     if subtitle_overlay:
         required_helper_flags.append('--subtitle-overlay')
     binary = ensure_native_binary(
+        config,
         rebuild=rebuild_native,
         required_flags=tuple(required_helper_flags),
     )

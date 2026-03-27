@@ -7,7 +7,14 @@ import time
 import pytest
 
 from vox_cli.config import RuntimeConfig, VoxConfig
-from vox_cli.runtime import RuntimeExecutionOptions, RuntimeLockBusyError, acquire_runtime_lock, acquire_runtime_lock_pool, acquire_runtime_locks
+from vox_cli.runtime import (
+    RuntimeExecutionOptions,
+    RuntimeLockBusyError,
+    acquire_runtime_lock,
+    acquire_runtime_lock_pool,
+    acquire_runtime_locks,
+    read_runtime_lock_state,
+)
 
 
 def _hold_lock(home_dir: str) -> None:
@@ -29,6 +36,28 @@ def test_runtime_lock_no_wait_fails_when_resource_busy(tmp_path: Path) -> None:
         with pytest.raises(RuntimeLockBusyError):
             with acquire_runtime_lock(config, 'tts_infer', options=options):
                 pass
+    finally:
+        proc.join(timeout=5)
+        if proc.is_alive():
+            proc.terminate()
+
+
+@pytest.mark.skipif(not hasattr(__import__('fcntl'), 'flock'), reason='requires fcntl/flock')
+def test_runtime_lock_busy_attempt_does_not_clear_owner_state(tmp_path: Path) -> None:
+    ctx = get_context('spawn')
+    proc = ctx.Process(target=_hold_lock, args=(str(tmp_path),))
+    proc.start()
+    try:
+        time.sleep(0.5)
+        config = VoxConfig(runtime=RuntimeConfig(home_dir=str(tmp_path), wait_for_lock=True, lock_wait_timeout_sec=5))
+        options = RuntimeExecutionOptions(wait_for_lock=False, wait_timeout_sec=1)
+        with pytest.raises(RuntimeLockBusyError):
+            with acquire_runtime_lock(config, 'tts_infer', options=options):
+                pass
+
+        state = read_runtime_lock_state(config, 'tts_infer')
+        assert state.pid == proc.pid
+        assert state.metadata.get('model_id') == 'demo'
     finally:
         proc.join(timeout=5)
         if proc.is_alive():
