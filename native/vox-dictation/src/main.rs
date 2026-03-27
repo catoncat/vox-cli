@@ -83,6 +83,7 @@ static LAST_RECORDING_STARTED_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_FLUSH_SENT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_FLUSH_UTTERANCE_ID: AtomicU64 = AtomicU64::new(0);
 static LAST_FINAL_UTTERANCE_ID: AtomicU64 = AtomicU64::new(0);
+static LAST_ABANDONED_UTTERANCE_ID: AtomicU64 = AtomicU64::new(0);
 static PARTIAL_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static PARTIAL_SENT_COUNT: AtomicU64 = AtomicU64::new(0);
 static PARTIAL_SKIPPED_BUSY_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -362,6 +363,16 @@ impl Controller {
         }
         if !BACKEND_READY.load(Ordering::SeqCst) {
             eprintln!("[vox-dictation] backend not ready yet");
+            return;
+        }
+        if let Some(utterance_id) = pending_flush_utterance_id() {
+            eprintln!(
+                "[vox-dictation] previous utterance still processing; wait for final text (utterance_id={})",
+                utterance_id
+            );
+            if SHOW_SUBTITLE_OVERLAY.load(Ordering::SeqCst) {
+                dispatch_subtitle_update("正在处理上一句…".to_string(), false);
+            }
             return;
         }
 
@@ -973,9 +984,25 @@ fn spawn_flush_watchdog(utterance_id: u64) {
             "[vox-dictation] flush watchdog timeout utterance_id={} after_ms={}",
             utterance_id, FLUSH_WATCHDOG_TIMEOUT_MS
         );
+        LAST_ABANDONED_UTTERANCE_ID.store(utterance_id, Ordering::SeqCst);
+        PARTIAL_REQUEST_IN_FLIGHT.store(false, Ordering::SeqCst);
         clear_partial_typing_state();
         dispatch_subtitle_hide();
     });
+}
+
+fn pending_flush_utterance_id() -> Option<u64> {
+    let flush_utterance_id = LAST_FLUSH_UTTERANCE_ID.load(Ordering::SeqCst);
+    if flush_utterance_id == 0 {
+        return None;
+    }
+    if flush_utterance_id <= LAST_FINAL_UTTERANCE_ID.load(Ordering::SeqCst) {
+        return None;
+    }
+    if flush_utterance_id <= LAST_ABANDONED_UTTERANCE_ID.load(Ordering::SeqCst) {
+        return None;
+    }
+    Some(flush_utterance_id)
 }
 
 fn extend_synthetic_input_window(extra_ms: u64) {
@@ -1236,6 +1263,27 @@ fn spawn_backend_worker(
                                             }
                                         } else if let Some(text) = msg.text {
                                             if msg.is_partial.unwrap_or(false) {
+                                                let utterance_id = msg.utterance_id.unwrap_or(0);
+                                                let abandoned_utterance_id =
+                                                    LAST_ABANDONED_UTTERANCE_ID.load(Ordering::SeqCst);
+                                                let completed_utterance_id =
+                                                    LAST_FINAL_UTTERANCE_ID.load(Ordering::SeqCst);
+                                                let current_utterance_id =
+                                                    NEXT_UTTERANCE_ID.load(Ordering::SeqCst);
+                                                if utterance_id > 0
+                                                    && (utterance_id <= abandoned_utterance_id
+                                                        || utterance_id <= completed_utterance_id
+                                                        || utterance_id != current_utterance_id)
+                                                {
+                                                    verbose_log!(
+                                                        "[vox-dictation] stale partial ignored utterance_id={} current_utterance_id={} last_final_utterance_id={} last_abandoned_utterance_id={}",
+                                                        utterance_id,
+                                                        current_utterance_id,
+                                                        completed_utterance_id,
+                                                        abandoned_utterance_id
+                                                    );
+                                                    continue;
+                                                }
                                                 PARTIAL_REQUEST_IN_FLIGHT.store(false, Ordering::SeqCst);
                                                 PARTIAL_RECEIVED_COUNT.fetch_add(1, Ordering::SeqCst);
                                                 if !text.is_empty() {
@@ -1275,6 +1323,16 @@ fn spawn_backend_worker(
                                                 let recording_started_at_ms =
                                                     LAST_RECORDING_STARTED_MS.load(Ordering::SeqCst);
                                                 let utterance_id = msg.utterance_id.unwrap_or(0);
+                                                let abandoned_utterance_id =
+                                                    LAST_ABANDONED_UTTERANCE_ID.load(Ordering::SeqCst);
+                                                if utterance_id > 0 && utterance_id <= abandoned_utterance_id {
+                                                    verbose_log!(
+                                                        "[vox-dictation] stale final ignored utterance_id={} last_abandoned_utterance_id={}",
+                                                        utterance_id,
+                                                        abandoned_utterance_id
+                                                    );
+                                                    continue;
+                                                }
                                                 let final_text = text.trim();
                                                 if utterance_id > 0 {
                                                     LAST_FINAL_UTTERANCE_ID.store(
