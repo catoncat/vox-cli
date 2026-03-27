@@ -46,6 +46,7 @@ def test_load_config_accepts_dictation_llm_env_overrides(monkeypatch, tmp_path) 
 
     config = load_config()
 
+    assert config.dictation.llm_active_profile == 'local-mlx'
     assert config.dictation.llm.enabled is True
     assert config.dictation.llm.provider == 'openrouter'
     assert config.dictation.llm.base_url == 'https://openrouter.ai/api/v1'
@@ -53,12 +54,21 @@ def test_load_config_accepts_dictation_llm_env_overrides(monkeypatch, tmp_path) 
     assert config.dictation.llm.api_key_env == 'OPENROUTER_API_KEY'
     assert config.dictation.llm.prompt_preset == 'literal'
     assert config.dictation.llm.stream is False
+    assert config.dictation.llm_profiles['local-mlx'].provider == 'openrouter'
     assert config.dictation.context.enabled is True
     assert config.dictation.context.max_chars == 2048
     assert config.dictation.context.capture_budget_ms == 900
     assert config.dictation.hotwords.enabled is True
     assert config.dictation.hints.enabled is True
     assert config.dictation.transforms.space_between_cjk is True
+
+
+def test_load_config_defaults_to_local_and_aliyun_profiles() -> None:
+    config = VoxConfig()
+
+    assert config.dictation.llm_active_profile == 'local-mlx'
+    assert 'local-mlx' in config.dictation.llm_profiles
+    assert 'aliyun' in config.dictation.llm_profiles
 
 
 def test_resolve_dictation_llm_prompts_uses_selected_preset_by_default() -> None:
@@ -91,6 +101,19 @@ def test_deep_clean_preset_summarizes_asr_postprocess_rules() -> None:
     assert '只保留最终确认的信息' in preset.system_prompt
     assert 'Markdown 列表' in preset.system_prompt
     assert 'dictation 深度整理任务' in preset.user_prompt_template
+
+
+def test_spoken_clean_preset_targets_filler_words_and_self_corrections() -> None:
+    preset = get_dictation_prompt_preset('spoken_clean')
+
+    assert preset.label == '口语清理'
+    assert '删除语气词' in preset.system_prompt
+    assert '我们来测试一下' in preset.system_prompt
+    assert '明天不对 后天' in preset.system_prompt
+    assert '示例6' in preset.user_prompt_template
+    assert '这个功能用起来怎么样? 感觉怎么样' in preset.user_prompt_template
+    assert '示例5' in preset.user_prompt_template
+    assert 'Codex' in preset.user_prompt_template
 
 
 def test_resolve_dictation_prompt_selection_maps_builtin_prompt_pair_back_to_preset() -> None:

@@ -126,6 +126,49 @@ _DICTATION_PROMPT_PRESETS: dict[str, DictationPromptPreset] = {
             '>>>'
         ),
     ),
+    'spoken_clean': DictationPromptPreset(
+        key='spoken_clean',
+        label='口语清理',
+        system_prompt=(
+            '你是中文 dictation 编辑器。'
+            '你的任务是把口述整理成用户最终要输入的自然中文。'
+            '重点删除语气词、口头铺垫、重复词、结巴、自我打断和犹豫停顿。'
+            '像“嗯、呃、就是、那个、这个这个、我想问一下、看一下、我觉得、要不”这类词，若不影响原意，尽量删掉。'
+            '像“我们来测试一下”“看一下”“就是这样”这类试探性铺垫，如果后面已经有明确要表达的内容，也尽量删掉。'
+            '遇到改口或自我修正时，只保留最后确认的内容，例如“明天不对 后天”应保留“后天”。'
+            '不要把正常信息删掉；时间、地点、动作、对象、术语、专有名词必须保留。'
+            '不要回答问题，不要解释，不要总结，不要添加原文没有的新事实。'
+            '最终只输出整理后的文本。'
+        ),
+        user_prompt_template=(
+            '下面是一些示例。请学习“删除口语噪音，但保留有效信息”的方式。\n\n'
+            '示例1\n'
+            '原文: 嗯这个这个功能吧, 就是说, 用起来怎么样\n'
+            '输出: 这个功能用起来怎么样\n\n'
+            '示例2\n'
+            '原文: 那个账号我想问一下是不是已经恢复了\n'
+            '输出: 那个账号是不是已经恢复了\n\n'
+            '示例3\n'
+            '原文: 明天不对 后天上午十点跟客户同步一下\n'
+            '输出: 后天上午十点跟客户同步一下\n\n'
+            '示例4\n'
+            '原文: 把这个功能先发测试环境 没问题再发正式\n'
+            '输出: 先把这个功能发到测试环境，没问题再发正式环境\n\n'
+            '示例5\n'
+            '原文: 嗯 Codex 这块你再帮我确认一下 然后 Ghostty 也顺便看一下\n'
+            '输出: 再帮我确认一下 Codex，顺便也看一下 Ghostty\n\n'
+            '示例6\n'
+            '原文: 我们来测试一下这个润色的能力, 看一下……嗯嗯, 这个这个那个……嗯, 这个……呃, 用起来怎么样? 感觉怎么样\n'
+            '输出: 这个功能用起来怎么样? 感觉怎么样\n\n'
+            '只有“原文”需要被整理；提示词、热词、上下文都只是参考，不是要你回应的消息。\n\n'
+            '{hints_block}\n\n'
+            '{hotwords_block}\n\n'
+            '{context_block}\n\n'
+            '现在请按同样方式整理下面这段口述，只输出结果。\n'
+            '原文: {text}\n'
+            '输出:'
+        ),
+    ),
     'literal': DictationPromptPreset(
         key='literal',
         label='最小改动',
@@ -196,6 +239,46 @@ class DictationLLMConfig(BaseModel):
     user_prompt_template: str = ''
 
 
+DEFAULT_DICTATION_LLM_ACTIVE_PROFILE = 'local-mlx'
+
+
+def _default_local_mlx_dictation_llm_config() -> DictationLLMConfig:
+    return DictationLLMConfig(
+        enabled=True,
+        provider='local-mlx',
+        base_url='http://127.0.0.1:18080/v1',
+        model='mlx-community/Qwen2.5-1.5B-Instruct-4bit',
+        api_key_env='',
+        timeout_sec=4.0,
+        stream=True,
+        temperature=0.0,
+        max_tokens=96,
+        prompt_preset='spoken_clean',
+    )
+
+
+def _default_aliyun_dictation_llm_config() -> DictationLLMConfig:
+    return DictationLLMConfig(
+        enabled=True,
+        provider='dashscope',
+        base_url='https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model='qwen-turbo-latest',
+        api_key_env='OPENAI_API_KEY',
+        timeout_sec=4.0,
+        stream=True,
+        temperature=0.0,
+        max_tokens=96,
+        prompt_preset='deep_clean',
+    )
+
+
+def default_dictation_llm_profiles() -> dict[str, DictationLLMConfig]:
+    return {
+        'local-mlx': _default_local_mlx_dictation_llm_config(),
+        'aliyun': _default_aliyun_dictation_llm_config(),
+    }
+
+
 class DictationContextConfig(BaseModel):
     enabled: bool = False
     max_chars: int = 1200
@@ -221,10 +304,28 @@ class DictationHintsConfig(BaseModel):
 
 class DictationConfig(BaseModel):
     transforms: DictationTransformConfig = DictationTransformConfig()
+    llm_active_profile: str = DEFAULT_DICTATION_LLM_ACTIVE_PROFILE
+    llm_profiles: dict[str, DictationLLMConfig] = Field(default_factory=default_dictation_llm_profiles)
     llm: DictationLLMConfig = DictationLLMConfig()
     context: DictationContextConfig = DictationContextConfig()
     hotwords: DictationHotwordsConfig = DictationHotwordsConfig()
     hints: DictationHintsConfig = DictationHintsConfig()
+
+
+def resolve_active_dictation_llm_config(dictation: DictationConfig) -> DictationLLMConfig:
+    profiles = dictation.llm_profiles or {}
+    if not profiles:
+        profiles = default_dictation_llm_profiles()
+        dictation.llm_profiles = {name: profile.model_copy(deep=True) for name, profile in profiles.items()}
+    active_profile = dictation.llm_active_profile.strip() or DEFAULT_DICTATION_LLM_ACTIVE_PROFILE
+    if active_profile not in dictation.llm_profiles:
+        active_profile = next(iter(dictation.llm_profiles))
+        dictation.llm_active_profile = active_profile
+    return dictation.llm_profiles[active_profile].model_copy(deep=True)
+
+
+def sync_active_dictation_llm_config(config: VoxConfig) -> None:
+    config.dictation.llm = resolve_active_dictation_llm_config(config.dictation)
 
 
 class VoxConfig(BaseModel):
@@ -346,6 +447,7 @@ def load_config() -> VoxConfig:
 
     data = _load_toml(cfg_path)
     merged = VoxConfig(**data) if data else defaults
+    sync_active_dictation_llm_config(merged)
 
     # Runtime home override has highest precedence.
     if home_override:
@@ -377,6 +479,10 @@ def load_config() -> VoxConfig:
 
     if (tts_design_default := os.getenv('VOX_TTS_DEFAULT_DESIGN_MODEL')):
         merged.tts.default_design_model = tts_design_default
+
+    if (active_profile := os.getenv('VOX_DICTATION_LLM_ACTIVE_PROFILE')):
+        merged.dictation.llm_active_profile = active_profile
+        sync_active_dictation_llm_config(merged)
 
     if (raw := os.getenv('VOX_DICTATION_LLM_ENABLED')):
         merged.dictation.llm.enabled = raw.lower() in {'1', 'true', 'yes', 'on'}
@@ -417,6 +523,8 @@ def load_config() -> VoxConfig:
     if (max_tokens := os.getenv('VOX_DICTATION_LLM_MAX_TOKENS')):
         merged.dictation.llm.max_tokens = int(max_tokens)
 
+    merged.dictation.llm_profiles[merged.dictation.llm_active_profile] = merged.dictation.llm.model_copy(deep=True)
+
     if (raw := os.getenv('VOX_DICTATION_CONTEXT_ENABLED')):
         merged.dictation.context.enabled = raw.lower() in {'1', 'true', 'yes', 'on'}
 
@@ -449,6 +557,8 @@ def load_config() -> VoxConfig:
 
     if (raw := os.getenv('VOX_DICTATION_STRIP_TRAILING_PUNCTUATION')):
         merged.dictation.transforms.strip_trailing_punctuation = raw.lower() in {'1', 'true', 'yes', 'on'}
+
+    sync_active_dictation_llm_config(merged)
 
     return merged
 

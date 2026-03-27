@@ -29,57 +29,63 @@ space_around_punct = false
 space_between_cjk = false
 strip_trailing_punctuation = false
 
-[dictation.llm]
-# 识别最终结果的可选 LLM 润色；仅在 vox dictation 启动的 session-server 上生效
-enabled = false
-provider = "openai-compatible"
+[dictation]
+# 当前激活的 LLM 配置集；UI 里切换的就是这个
+llm_active_profile = "local-mlx"
 
-# 只要兼容 OpenAI Chat Completions，都可以自定义：
+[dictation.llm_profiles."local-mlx"]
+# 本地 MLX 推荐：Qwen2.5-1.5B + spoken_clean
+enabled = true
+provider = "local-mlx"
+base_url = "http://127.0.0.1:18080/v1"
+model = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+# 对本地 loopback / local-mlx，留空也可以
+api_key_env = ""
+timeout_sec = 4.0
+stream = true
+temperature = 0.0
+max_tokens = 96
+prompt_preset = "spoken_clean"
+
+[dictation.llm_profiles."aliyun"]
+enabled = true
+provider = "dashscope"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+model = "qwen-turbo-latest"
+api_key_env = "OPENAI_API_KEY"
+timeout_sec = 4.0
+stream = true
+temperature = 0.0
+max_tokens = 96
+prompt_preset = "deep_clean"
+
+# 只要兼容 OpenAI Chat Completions，都可以再加新的 profile：
 # OpenAI:       https://api.openai.com/v1
 # OpenRouter:   https://openrouter.ai/api/v1
-# DashScope:    https://dashscope.aliyuncs.com/compatible-mode/v1
 # Moonshot:     https://api.moonshot.cn/v1
 # SiliconFlow:  https://api.siliconflow.cn/v1
 # 也可以填你自己的 LiteLLM / vLLM / OneAPI 网关
+#
+# [dictation.llm_profiles."my-provider"]
+# enabled = true
+# provider = "openai-compatible"
 # base_url = "https://api.openai.com/v1"
 # model = "gpt-4o-mini"
-
-# 两种方式二选一：
-# 1) 直接把 key 写在配置里
-# api_key = "sk-..."
-# 2) 从环境变量读取
-api_key_env = "OPENAI_API_KEY"
-
-# 某些兼容网关需要额外请求头时可以在这里补
-# [dictation.llm.headers]
-# HTTP-Referer = "https://your.app"
-# X-Title = "vox-cli"
-
-timeout_sec = 20.0
-# 默认用流式响应拿 LLM 改写结果；如果你的兼容网关不支持 SSE，可以关掉
-stream = true
-temperature = 0.0
-# max_tokens = 256
-
-# 内置预设：
-# - default: 平衡纠错
-# - deep_clean: 深度整理
-# - literal: 最小改动
-# - arena: 竞技场风格
-prompt_preset = "default"
-
-# 留空时继承预设；需要单独微调时再显式覆盖
+# api_key_env = "OPENAI_API_KEY"
+# timeout_sec = 8.0
+# stream = true
+# temperature = 0.0
+# max_tokens = 96
+# prompt_preset = "default"
+#
+# # 留空时继承预设；需要单独微调时再显式覆盖
 # system_prompt = """
 # 自定义 system prompt
 # """
-#
 # user_prompt_template = """
 # {hints_block}
-#
 # {hotwords_block}
-#
 # {context_block}
-#
 # 语言: {language}
 # 待处理文本:
 # <<<

@@ -15,15 +15,18 @@ def test_strip_managed_dictation_ui_sections_preserves_other_sections() -> None:
 [runtime]
 home_dir = "~/.vox"
 
+[dictation]
+llm_active_profile = "local-mlx"
+
 [dictation.transforms]
 fullwidth_to_halfwidth = true
 
-[dictation.llm]
+[dictation.llm_profiles."local-mlx"]
+enabled = true
+
+[dictation.llm_profiles."aliyun"]
 enabled = true
 api_key = "sk-demo"
-
-[dictation.llm.headers]
-X-Title = "vox"
 
 [dictation.context]
 enabled = true
@@ -48,9 +51,9 @@ default_model = "demo"
 
     assert '[runtime]' in result
     assert '[tts]' in result
+    assert '[dictation]' not in result
     assert '[dictation.transforms]' not in result
-    assert '[dictation.llm]' not in result
-    assert '[dictation.llm.headers]' in result
+    assert '[dictation.llm_profiles."local-mlx"]' not in result
     assert '[dictation.context]' not in result
     assert '[dictation.hotwords]' not in result
     assert '[dictation.hints]' not in result
@@ -65,20 +68,40 @@ def test_render_dictation_ui_sections_outputs_expected_toml() -> None:
                 'space_between_cjk': True,
                 'strip_trailing_punctuation': True,
             },
-            'llm': {
-                'enabled': True,
-                'provider': 'openrouter',
-                'base_url': 'https://openrouter.ai/api/v1',
-                'model': 'openai/gpt-4o-mini',
-                'api_key_env': 'OPENROUTER_API_KEY',
-                'timeout_sec': 8.5,
-                'stream': True,
-                'temperature': 0.0,
-                'max_tokens': 256,
-                'prompt_preset': 'arena',
-                'custom_prompt_enabled': True,
-                'system_prompt': '第一行\n第二行',
-                'user_prompt_template': 'LANG={language}\nTEXT={text}',
+            'llm_active_profile': 'aliyun',
+            'llm_profiles': {
+                'local-mlx': {
+                    'enabled': True,
+                    'provider': 'local-mlx',
+                    'base_url': 'http://127.0.0.1:18080/v1',
+                    'model': 'mlx-community/Qwen2.5-1.5B-Instruct-4bit',
+                    'api_key_env': '',
+                    'timeout_sec': 4.0,
+                    'stream': True,
+                    'temperature': 0.0,
+                    'max_tokens': 96,
+                    'prompt_preset': 'spoken_clean',
+                    'custom_prompt_enabled': False,
+                    'system_prompt': '',
+                    'user_prompt_template': '',
+                    'api_key_present': False,
+                },
+                'aliyun': {
+                    'enabled': True,
+                    'provider': 'dashscope',
+                    'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                    'model': 'qwen-turbo-latest',
+                    'api_key_env': 'OPENAI_API_KEY',
+                    'timeout_sec': 4.0,
+                    'stream': True,
+                    'temperature': 0.0,
+                    'max_tokens': 96,
+                    'prompt_preset': 'deep_clean',
+                    'custom_prompt_enabled': True,
+                    'system_prompt': '第一行\n第二行',
+                    'user_prompt_template': 'LANG={language}\nTEXT={text}',
+                    'api_key_present': True,
+                },
             },
             'context': {'enabled': True, 'max_chars': 1400, 'capture_budget_ms': 900},
             'hotwords': {
@@ -95,19 +118,20 @@ def test_render_dictation_ui_sections_outputs_expected_toml() -> None:
                 'items': ['说话人前后鼻音不分。'],
             },
         },
-        preserved_llm_api_key='sk-demo',
+        preserved_llm_api_keys={'aliyun': 'sk-demo'},
     )
 
+    assert '[dictation]' in rendered
+    assert 'llm_active_profile = "aliyun"' in rendered
     assert '[dictation.transforms]' in rendered
-    assert 'fullwidth_to_halfwidth = true' in rendered
-    assert 'space_between_cjk = true' in rendered
-    assert '[dictation.llm]' in rendered
-    assert 'provider = "openrouter"' in rendered
-    assert 'prompt_preset = "arena"' in rendered
-    assert 'base_url = "https://openrouter.ai/api/v1"' in rendered
-    assert 'model = "openai/gpt-4o-mini"' in rendered
+    assert '[dictation.llm_profiles."local-mlx"]' in rendered
+    assert 'provider = "local-mlx"' in rendered
+    assert 'prompt_preset = "spoken_clean"' in rendered
+    assert '[dictation.llm_profiles."aliyun"]' in rendered
+    assert 'provider = "dashscope"' in rendered
+    assert 'model = "qwen-turbo-latest"' in rendered
     assert 'api_key = "sk-demo"' in rendered
-    assert 'api_key_env = "OPENROUTER_API_KEY"' in rendered
+    assert 'api_key_env = "OPENAI_API_KEY"' in rendered
     assert "system_prompt = '''" in rendered
     assert '第一行' in rendered
     assert 'user_prompt_template = ' in rendered
@@ -127,11 +151,11 @@ def test_save_dictation_ui_state_updates_only_managed_sections(tmp_path) -> None
     config_path.write_text(
         '[runtime]\n'
         'home_dir = "~/.vox"\n\n'
-        '[dictation.llm]\n'
+        '[dictation]\n'
+        'llm_active_profile = "aliyun"\n\n'
+        '[dictation.llm_profiles."aliyun"]\n'
         'enabled = true\n'
         'api_key = "sk-existing"\n\n'
-        '[dictation.llm.headers]\n'
-        'X-Title = "vox"\n\n'
         '[tts]\n'
         'default_model = "base"\n',
         encoding='utf-8',
@@ -146,21 +170,40 @@ def test_save_dictation_ui_state_updates_only_managed_sections(tmp_path) -> None
                 'space_between_cjk': False,
                 'strip_trailing_punctuation': True,
             },
-            'llm': {
-                'enabled': True,
-                'provider': 'dashscope',
-                'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-                'model': 'qwen-flash',
-                'api_key_env': 'DASHSCOPE_API_KEY',
-                'timeout_sec': 6.5,
-                'stream': True,
-                'temperature': 0.0,
-                'max_tokens': 128,
-                'prompt_preset': 'arena',
-                'custom_prompt_enabled': True,
-                'system_prompt': '你是修订器',
-                'user_prompt_template': 'TEXT={text}',
-                'api_key_present': True,
+            'llm_active_profile': 'local-mlx',
+            'llm_profiles': {
+                'local-mlx': {
+                    'enabled': True,
+                    'provider': 'local-mlx',
+                    'base_url': 'http://127.0.0.1:18080/v1',
+                    'model': 'mlx-community/Qwen2.5-1.5B-Instruct-4bit',
+                    'api_key_env': '',
+                    'timeout_sec': 4.0,
+                    'stream': True,
+                    'temperature': 0.0,
+                    'max_tokens': 96,
+                    'prompt_preset': 'spoken_clean',
+                    'custom_prompt_enabled': False,
+                    'system_prompt': '',
+                    'user_prompt_template': '',
+                    'api_key_present': False,
+                },
+                'aliyun': {
+                    'enabled': True,
+                    'provider': 'dashscope',
+                    'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                    'model': 'qwen-turbo-latest',
+                    'api_key_env': 'OPENAI_API_KEY',
+                    'timeout_sec': 6.5,
+                    'stream': True,
+                    'temperature': 0.0,
+                    'max_tokens': 128,
+                    'prompt_preset': 'deep_clean',
+                    'custom_prompt_enabled': True,
+                    'system_prompt': '你是修订器',
+                    'user_prompt_template': 'TEXT={text}',
+                    'api_key_present': True,
+                },
             },
             'context': {'enabled': True, 'max_chars': 900, 'capture_budget_ms': 750},
             'hotwords': {
@@ -181,16 +224,17 @@ def test_save_dictation_ui_state_updates_only_managed_sections(tmp_path) -> None
     text = config_path.read_text(encoding='utf-8')
     assert '[runtime]' in text
     assert '[tts]' in text
-    assert '[dictation.transforms]' in text
-    assert '[dictation.llm]' in text
+    assert '[dictation]' in text
+    assert 'llm_active_profile = "local-mlx"' in text
+    assert '[dictation.llm_profiles."local-mlx"]' in text
+    assert '[dictation.llm_profiles."aliyun"]' in text
     assert 'provider = "dashscope"' in text
-    assert 'prompt_preset = "arena"' in text
     assert 'api_key = "sk-existing"' in text
-    assert '[dictation.llm.headers]' in text
     assert '[dictation.context]' in text
     assert '[dictation.hotwords]' in text
     assert '[dictation.hints]' in text
-    assert state['state']['llm']['api_key_present'] is True
+    assert state['state']['llm_profiles']['aliyun']['api_key_present'] is True
+    assert state['state']['llm_active_profile'] == 'local-mlx'
     assert state['state']['context']['max_chars'] == 900
     assert state['state']['hotwords']['entries'][0]['value'] == '潮汕'
 
@@ -199,7 +243,9 @@ def test_build_dictation_ui_state_does_not_expose_inline_api_key(tmp_path) -> No
     config = VoxConfig(runtime=RuntimeConfig(home_dir=str(tmp_path)))
     config_path = tmp_path / 'config.toml'
     config_path.write_text(
-        '[dictation.llm]\n'
+        '[dictation]\n'
+        'llm_active_profile = "aliyun"\n\n'
+        '[dictation.llm_profiles."aliyun"]\n'
         'enabled = true\n'
         'api_key = "sk-secret"\n'
         'api_key_env = "OPENAI_API_KEY"\n'
@@ -209,20 +255,22 @@ def test_build_dictation_ui_state_does_not_expose_inline_api_key(tmp_path) -> No
 
     payload = build_dictation_ui_state(config)
 
-    assert payload['state']['llm']['enabled'] is True
-    assert payload['state']['llm']['api_key_present'] is True
-    assert payload['state']['llm']['custom_prompt_enabled'] is True
-    assert payload['state']['llm']['prompt_preset'] == 'default'
+    assert payload['state']['llm_active_profile'] == 'aliyun'
+    assert payload['state']['llm_profiles']['aliyun']['enabled'] is True
+    assert payload['state']['llm_profiles']['aliyun']['api_key_present'] is True
+    assert payload['state']['llm_profiles']['aliyun']['custom_prompt_enabled'] is True
     assert payload['prompt_presets']
-    assert 'api_key' not in payload['state']['llm']
+    assert 'api_key' not in payload['state']['llm_profiles']['aliyun']
 
 
-def test_build_dictation_ui_state_recognizes_legacy_builtin_prompt_as_preset(tmp_path) -> None:
+def test_build_dictation_ui_state_recognizes_builtin_prompt_as_preset(tmp_path) -> None:
     config = VoxConfig(runtime=RuntimeConfig(home_dir=str(tmp_path)))
     config_path = tmp_path / 'config.toml'
     preset = get_dictation_prompt_preset('default')
     config_path.write_text(
-        '[dictation.llm]\n'
+        '[dictation]\n'
+        'llm_active_profile = "local-mlx"\n\n'
+        '[dictation.llm_profiles."local-mlx"]\n'
         f"system_prompt = '''\n{preset.system_prompt}\n'''\n"
         f"user_prompt_template = '''\n{preset.user_prompt_template}\n'''\n",
         encoding='utf-8',
@@ -230,22 +278,26 @@ def test_build_dictation_ui_state_recognizes_legacy_builtin_prompt_as_preset(tmp
 
     payload = build_dictation_ui_state(config)
 
-    assert payload['state']['llm']['prompt_preset'] == 'default'
-    assert payload['state']['llm']['custom_prompt_enabled'] is False
-    assert payload['state']['llm']['system_prompt'] == preset.system_prompt
-    assert payload['state']['llm']['user_prompt_template'] == preset.user_prompt_template
+    assert payload['state']['llm_profiles']['local-mlx']['prompt_preset'] == 'default'
+    assert payload['state']['llm_profiles']['local-mlx']['custom_prompt_enabled'] is False
+    assert payload['state']['llm_profiles']['local-mlx']['system_prompt'] == preset.system_prompt
+    assert payload['state']['llm_profiles']['local-mlx']['user_prompt_template'] == preset.user_prompt_template
 
 
 def test_render_dictation_ui_sections_omits_prompt_override_when_using_preset() -> None:
     rendered = render_dictation_ui_sections(
         {
-            'llm': {
-                'enabled': True,
-                'provider': 'openai-compatible',
-                'prompt_preset': 'literal',
-                'custom_prompt_enabled': False,
-                'system_prompt': 'should not persist',
-                'user_prompt_template': 'TEXT={text}',
+            'llm_active_profile': 'local-mlx',
+            'llm_profiles': {
+                'local-mlx': {
+                    'enabled': True,
+                    'provider': 'local-mlx',
+                    'prompt_preset': 'literal',
+                    'custom_prompt_enabled': False,
+                    'system_prompt': 'should not persist',
+                    'user_prompt_template': 'TEXT={text}',
+                    'api_key_present': False,
+                },
             },
         }
     )

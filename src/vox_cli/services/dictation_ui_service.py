@@ -13,11 +13,14 @@ import webbrowser
 from pydantic import BaseModel, Field
 
 from ..config import (
+    DEFAULT_DICTATION_LLM_ACTIVE_PROFILE,
     VoxConfig,
     _load_toml,
+    default_dictation_llm_profiles,
     get_config_path,
     get_dictation_prompt_presets,
     resolve_dictation_prompt_selection,
+    sync_active_dictation_llm_config,
 )
 from .dictation_context_service import capture_dictation_context
 from .dictation_service import dictation_agent_log_path, dictation_session_log_path, tail_session_log
@@ -35,7 +38,7 @@ class DictationUiTransformsPayload(BaseModel):
     strip_trailing_punctuation: bool = False
 
 
-class DictationUiLlmPayload(BaseModel):
+class DictationUiLlmProfilePayload(BaseModel):
     enabled: bool = False
     provider: str = 'openai-compatible'
     base_url: str = ''
@@ -50,6 +53,31 @@ class DictationUiLlmPayload(BaseModel):
     system_prompt: str = ''
     user_prompt_template: str = ''
     api_key_present: bool = False
+
+
+def _default_ui_llm_profiles() -> dict[str, DictationUiLlmProfilePayload]:
+    profiles: dict[str, DictationUiLlmProfilePayload] = {}
+    for name, profile in default_dictation_llm_profiles().items():
+        prompt_preset, custom_prompt_enabled, resolved_system_prompt, resolved_user_prompt_template = (
+            resolve_dictation_prompt_selection(profile)
+        )
+        profiles[name] = DictationUiLlmProfilePayload(
+            enabled=profile.enabled,
+            provider=profile.provider,
+            base_url=profile.base_url or '',
+            model=profile.model or '',
+            api_key_env=profile.api_key_env or '',
+            timeout_sec=profile.timeout_sec,
+            stream=profile.stream,
+            temperature=profile.temperature,
+            max_tokens=profile.max_tokens,
+            prompt_preset=prompt_preset,
+            custom_prompt_enabled=custom_prompt_enabled,
+            system_prompt=resolved_system_prompt,
+            user_prompt_template=resolved_user_prompt_template,
+            api_key_present=bool(profile.api_key),
+        )
+    return profiles
 
 
 class DictationUiContextPayload(BaseModel):
@@ -72,15 +100,16 @@ class DictationUiHintsPayload(BaseModel):
 
 class DictationUiStatePayload(BaseModel):
     transforms: DictationUiTransformsPayload = DictationUiTransformsPayload()
-    llm: DictationUiLlmPayload = DictationUiLlmPayload()
+    llm_active_profile: str = DEFAULT_DICTATION_LLM_ACTIVE_PROFILE
+    llm_profiles: dict[str, DictationUiLlmProfilePayload] = Field(default_factory=_default_ui_llm_profiles)
     context: DictationUiContextPayload = DictationUiContextPayload()
     hotwords: DictationUiHotwordsPayload = DictationUiHotwordsPayload()
     hints: DictationUiHintsPayload = DictationUiHintsPayload()
 
 
 _MANAGED_HEADERS = {
+    '[dictation]',
     '[dictation.transforms]',
-    '[dictation.llm]',
     '[dictation.context]',
     '[dictation.hotwords]',
     '[[dictation.hotwords.entries]]',
@@ -111,9 +140,27 @@ def launch_dictation_ui(
 
 def build_dictation_ui_state(config: VoxConfig) -> dict[str, Any]:
     live = _read_config_for_ui(config)
-    prompt_preset, custom_prompt_enabled, resolved_system_prompt, resolved_user_prompt_template = (
-        resolve_dictation_prompt_selection(live.dictation.llm)
-    )
+    llm_profiles: dict[str, DictationUiLlmProfilePayload] = {}
+    for name, profile in live.dictation.llm_profiles.items():
+        prompt_preset, custom_prompt_enabled, resolved_system_prompt, resolved_user_prompt_template = (
+            resolve_dictation_prompt_selection(profile)
+        )
+        llm_profiles[name] = DictationUiLlmProfilePayload(
+            enabled=profile.enabled,
+            provider=profile.provider,
+            base_url=profile.base_url or '',
+            model=profile.model or '',
+            api_key_env=profile.api_key_env or '',
+            timeout_sec=profile.timeout_sec,
+            stream=profile.stream,
+            temperature=profile.temperature,
+            max_tokens=profile.max_tokens,
+            prompt_preset=prompt_preset,
+            custom_prompt_enabled=custom_prompt_enabled,
+            system_prompt=resolved_system_prompt,
+            user_prompt_template=resolved_user_prompt_template,
+            api_key_present=bool(profile.api_key),
+        )
     state = DictationUiStatePayload(
         transforms=DictationUiTransformsPayload(
             fullwidth_to_halfwidth=live.dictation.transforms.fullwidth_to_halfwidth,
@@ -121,22 +168,8 @@ def build_dictation_ui_state(config: VoxConfig) -> dict[str, Any]:
             space_between_cjk=live.dictation.transforms.space_between_cjk,
             strip_trailing_punctuation=live.dictation.transforms.strip_trailing_punctuation,
         ),
-        llm=DictationUiLlmPayload(
-            enabled=live.dictation.llm.enabled,
-            provider=live.dictation.llm.provider,
-            base_url=live.dictation.llm.base_url or '',
-            model=live.dictation.llm.model or '',
-            api_key_env=live.dictation.llm.api_key_env or '',
-            timeout_sec=live.dictation.llm.timeout_sec,
-            stream=live.dictation.llm.stream,
-            temperature=live.dictation.llm.temperature,
-            max_tokens=live.dictation.llm.max_tokens,
-            prompt_preset=prompt_preset,
-            custom_prompt_enabled=custom_prompt_enabled,
-            system_prompt=resolved_system_prompt,
-            user_prompt_template=resolved_user_prompt_template,
-            api_key_present=bool(live.dictation.llm.api_key),
-        ),
+        llm_active_profile=live.dictation.llm_active_profile,
+        llm_profiles=llm_profiles,
         context=DictationUiContextPayload(
             enabled=live.dictation.context.enabled,
             max_chars=live.dictation.context.max_chars,
@@ -187,7 +220,11 @@ def save_dictation_ui_state(config: VoxConfig, payload: dict[str, Any]) -> dict[
     preserved_text = strip_managed_dictation_ui_sections(existing_text)
     managed_text = render_dictation_ui_sections(
         state,
-        preserved_llm_api_key=live.dictation.llm.api_key if state.llm.api_key_present else None,
+        preserved_llm_api_keys={
+            name: profile.api_key
+            for name, profile in live.dictation.llm_profiles.items()
+            if profile.api_key
+        },
     )
 
     next_text = preserved_text.rstrip()
@@ -208,7 +245,7 @@ def strip_managed_dictation_ui_sections(text: str) -> str:
         stripped = line.strip()
         is_header = stripped.startswith('[') and stripped.endswith(']')
         if is_header:
-            if stripped in _MANAGED_HEADERS:
+            if _is_managed_dictation_header(stripped):
                 skipping = True
                 while kept and not kept[-1].strip():
                     kept.pop()
@@ -224,55 +261,61 @@ def strip_managed_dictation_ui_sections(text: str) -> str:
     return '\n'.join(kept)
 
 
+def _is_managed_dictation_header(header: str) -> bool:
+    return (
+        header in _MANAGED_HEADERS
+        or header.startswith('[dictation.llm')
+    )
+
+
 def render_dictation_ui_sections(
     state: DictationUiStatePayload | dict[str, Any],
     *,
-    preserved_llm_api_key: str | None = None,
+    preserved_llm_api_keys: dict[str, str] | None = None,
 ) -> str:
-    infer_custom_prompt_enabled = False
-    if isinstance(state, dict):
-        raw_llm = state.get('llm')
-        if isinstance(raw_llm, dict) and 'custom_prompt_enabled' not in raw_llm:
-            infer_custom_prompt_enabled = bool(
-                str(raw_llm.get('system_prompt', '')).strip()
-                or str(raw_llm.get('user_prompt_template', '')).strip()
-            )
     state = DictationUiStatePayload.model_validate(state)
-    custom_prompt_enabled = bool(state.llm.custom_prompt_enabled or infer_custom_prompt_enabled)
     lines: list[str] = [
+        '[dictation]',
+        f'llm_active_profile = {_toml_string(state.llm_active_profile.strip() or DEFAULT_DICTATION_LLM_ACTIVE_PROFILE)}',
+        '',
         '[dictation.transforms]',
         f'fullwidth_to_halfwidth = {_toml_bool(state.transforms.fullwidth_to_halfwidth)}',
         f'space_around_punct = {_toml_bool(state.transforms.space_around_punct)}',
         f'space_between_cjk = {_toml_bool(state.transforms.space_between_cjk)}',
         f'strip_trailing_punctuation = {_toml_bool(state.transforms.strip_trailing_punctuation)}',
-        '',
-        '[dictation.llm]',
-        f'enabled = {_toml_bool(state.llm.enabled)}',
-        f'provider = {_toml_string(state.llm.provider.strip() or "openai-compatible")}',
-        f'prompt_preset = {_toml_string(state.llm.prompt_preset.strip() or "default")}',
     ]
-
-    if (base_url := state.llm.base_url.strip()):
-        lines.append(f'base_url = {_toml_string(base_url)}')
-    if (model := state.llm.model.strip()):
-        lines.append(f'model = {_toml_string(model)}')
-    if preserved_llm_api_key:
-        lines.append(f'api_key = {_toml_string(preserved_llm_api_key)}')
-    if (api_key_env := state.llm.api_key_env.strip()):
-        lines.append(f'api_key_env = {_toml_string(api_key_env)}')
-
-    lines.extend(
-        [
-            f'timeout_sec = {_toml_number(max(0.1, float(state.llm.timeout_sec)))}',
-            f'stream = {_toml_bool(state.llm.stream)}',
-            f'temperature = {_toml_number(float(state.llm.temperature))}',
-        ]
-    )
-    if state.llm.max_tokens is not None and int(state.llm.max_tokens) > 0:
-        lines.append(f'max_tokens = {int(state.llm.max_tokens)}')
-    if custom_prompt_enabled:
-        lines.append(f'system_prompt = {_toml_text(_normalize_text_block(state.llm.system_prompt))}')
-        lines.append(f'user_prompt_template = {_toml_text(_normalize_text_block(state.llm.user_prompt_template))}')
+    preserved_llm_api_keys = preserved_llm_api_keys or {}
+    for profile_name, profile in state.llm_profiles.items():
+        custom_prompt_enabled = bool(profile.custom_prompt_enabled)
+        lines.extend(
+            [
+                '',
+                f'[dictation.llm_profiles.{_toml_key(profile_name)}]',
+                f'enabled = {_toml_bool(profile.enabled)}',
+                f'provider = {_toml_string(profile.provider.strip() or "openai-compatible")}',
+                f'prompt_preset = {_toml_string(profile.prompt_preset.strip() or "default")}',
+            ]
+        )
+        if (base_url := profile.base_url.strip()):
+            lines.append(f'base_url = {_toml_string(base_url)}')
+        if (model := profile.model.strip()):
+            lines.append(f'model = {_toml_string(model)}')
+        if preserved_llm_api_keys.get(profile_name) and profile.api_key_present:
+            lines.append(f'api_key = {_toml_string(preserved_llm_api_keys[profile_name])}')
+        if (api_key_env := profile.api_key_env.strip()):
+            lines.append(f'api_key_env = {_toml_string(api_key_env)}')
+        lines.extend(
+            [
+                f'timeout_sec = {_toml_number(max(0.1, float(profile.timeout_sec)))}',
+                f'stream = {_toml_bool(profile.stream)}',
+                f'temperature = {_toml_number(float(profile.temperature))}',
+            ]
+        )
+        if profile.max_tokens is not None and int(profile.max_tokens) > 0:
+            lines.append(f'max_tokens = {int(profile.max_tokens)}')
+        if custom_prompt_enabled:
+            lines.append(f'system_prompt = {_toml_text(_normalize_text_block(profile.system_prompt))}')
+            lines.append(f'user_prompt_template = {_toml_text(_normalize_text_block(profile.user_prompt_template))}')
     lines.extend(
         [
             '',
@@ -336,6 +379,10 @@ def _toml_bool(value: bool) -> str:
 
 
 def _toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _toml_key(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
@@ -434,10 +481,12 @@ def _read_config_for_ui(config: VoxConfig) -> VoxConfig:
     config_path = get_config_path(config)
     data = _load_toml(config_path)
     if not data:
+        sync_active_dictation_llm_config(config)
         return config
     live = config.model_copy(deep=True)
     merged = VoxConfig(**data)
     live.dictation = merged.dictation
+    sync_active_dictation_llm_config(live)
     return live
 
 
@@ -1617,8 +1666,29 @@ _DICTATION_UI_HTML = r"""<!doctype html>
 
         <section class="pane" id="paneModel">
           <section class="group">
-            <h2>模型</h2>
+            <h2>配置集</h2>
             <div class="settings-items">
+              <div class="setting-row">
+                <div class="setting-copy">
+                  <strong>当前配置</strong>
+                  <p>保存多组并快速切换</p>
+                </div>
+                <div class="setting-control">
+                  <div class="field-stack" style="width:min(100%, 560px);">
+                    <div class="row-grid">
+                      <div class="field">
+                        <label for="llmProfile">配置集</label>
+                        <select id="llmProfile"></select>
+                      </div>
+                    </div>
+                    <div class="inline-actions">
+                      <button class="btn secondary" id="addProfileBtn" type="button">新增</button>
+                      <button class="btn secondary" id="duplicateProfileBtn" type="button">复制</button>
+                      <button class="btn secondary" id="deleteProfileBtn" type="button">删除</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
               <div class="setting-row">
                 <div class="setting-copy">
                   <strong>Provider / Model</strong>
@@ -1889,6 +1959,7 @@ _DICTATION_UI_HTML = r"""<!doctype html>
   </div>
 
   <datalist id="providerOptions">
+    <option value="local-mlx"></option>
     <option value="openai-compatible"></option>
     <option value="openrouter"></option>
     <option value="dashscope"></option>
@@ -1991,6 +2062,187 @@ _DICTATION_UI_HTML = r"""<!doctype html>
       $('userPromptMode').textContent = customEnabled ? '自定义' : '跟随预设';
     }
 
+    function cloneJson(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function defaultProfileState(name = '') {
+      if (name === 'local-mlx') {
+        return {
+          enabled: true,
+          provider: 'local-mlx',
+          base_url: 'http://127.0.0.1:18080/v1',
+          model: 'mlx-community/Qwen2.5-1.5B-Instruct-4bit',
+          api_key_env: '',
+          timeout_sec: 4.0,
+          stream: true,
+          temperature: 0.0,
+          max_tokens: 96,
+          prompt_preset: 'spoken_clean',
+          custom_prompt_enabled: false,
+          system_prompt: '',
+          user_prompt_template: '',
+          api_key_present: false,
+        };
+      }
+      if (name === 'aliyun') {
+        return {
+          enabled: true,
+          provider: 'dashscope',
+          base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          model: 'qwen-turbo-latest',
+          api_key_env: 'OPENAI_API_KEY',
+          timeout_sec: 4.0,
+          stream: true,
+          temperature: 0.0,
+          max_tokens: 96,
+          prompt_preset: 'deep_clean',
+          custom_prompt_enabled: false,
+          system_prompt: '',
+          user_prompt_template: '',
+          api_key_present: false,
+        };
+      }
+      return {
+        enabled: false,
+        provider: 'openai-compatible',
+        base_url: '',
+        model: '',
+        api_key_env: 'OPENAI_API_KEY',
+        timeout_sec: 20.0,
+        stream: true,
+        temperature: 0.0,
+        max_tokens: null,
+        prompt_preset: 'default',
+        custom_prompt_enabled: false,
+        system_prompt: '',
+        user_prompt_template: '',
+        api_key_present: false,
+      };
+    }
+
+    function createEmptyState() {
+      return {
+        transforms: {
+          fullwidth_to_halfwidth: false,
+          space_around_punct: false,
+          space_between_cjk: false,
+          strip_trailing_punctuation: false,
+        },
+        llm_active_profile: 'local-mlx',
+        llm_profiles: {
+          'local-mlx': defaultProfileState('local-mlx'),
+          'aliyun': defaultProfileState('aliyun'),
+        },
+        context: {
+          enabled: false,
+          max_chars: 1200,
+          capture_budget_ms: 1200,
+        },
+        hotwords: {
+          enabled: false,
+          rewrite_aliases: true,
+          case_sensitive: false,
+          entries: [],
+        },
+        hints: {
+          enabled: false,
+          items: [],
+        },
+      };
+    }
+
+    function getProfileNames(payloadState = state.data && state.data.state) {
+      return Object.keys((payloadState && payloadState.llm_profiles) || {});
+    }
+
+    function getActiveProfileName(payloadState = state.data && state.data.state) {
+      const names = getProfileNames(payloadState);
+      if (!names.length) return 'local-mlx';
+      const active = normalizeInline(payloadState && payloadState.llm_active_profile);
+      return names.includes(active) ? active : names[0];
+    }
+
+    function getActiveProfile(payloadState = state.data && state.data.state) {
+      const activeName = getActiveProfileName(payloadState);
+      const profiles = (payloadState && payloadState.llm_profiles) || {};
+      return profiles[activeName] || defaultProfileState(activeName);
+    }
+
+    function collectLlmEditorState() {
+      const active = getActiveProfile();
+      return {
+        enabled: $('llmEnabled').checked,
+        provider: $('llmProvider').value.trim(),
+        base_url: $('llmBaseUrl').value.trim(),
+        model: $('llmModel').value.trim(),
+        api_key_env: $('llmApiKeyEnv').value.trim(),
+        timeout_sec: readNumber('llmTimeoutSec', 20),
+        stream: $('llmStream').checked,
+        temperature: readNumber('llmTemperature', 0),
+        max_tokens: readOptionalInt('llmMaxTokens'),
+        prompt_preset: $('promptPreset').value.trim() || 'default',
+        custom_prompt_enabled: $('customPromptEnabled').checked,
+        system_prompt: $('systemPrompt').value,
+        user_prompt_template: $('userPromptTemplate').value,
+        api_key_present: !!active.api_key_present,
+      };
+    }
+
+    function syncEditorToActiveProfile(payloadState) {
+      if (!payloadState.llm_profiles) {
+        payloadState.llm_profiles = {};
+      }
+      const activeName = getActiveProfileName(payloadState);
+      payloadState.llm_active_profile = activeName;
+      payloadState.llm_profiles[activeName] = {
+        ...defaultProfileState(activeName),
+        ...(payloadState.llm_profiles[activeName] || {}),
+        ...collectLlmEditorState(),
+      };
+    }
+
+    function loadLlmEditor(profile) {
+      $('llmEnabled').checked = !!profile.enabled;
+      $('llmProvider').value = profile.provider || 'openai-compatible';
+      $('llmBaseUrl').value = profile.base_url || '';
+      $('llmModel').value = profile.model || '';
+      $('llmApiKeyEnv').value = profile.api_key_env || '';
+      $('llmTimeoutSec').value = profile.timeout_sec ?? 20.0;
+      $('llmStream').checked = !!profile.stream;
+      $('llmTemperature').value = profile.temperature ?? 0.0;
+      $('llmMaxTokens').value = profile.max_tokens ?? '';
+      $('promptPreset').value = profile.prompt_preset || 'default';
+      $('customPromptEnabled').checked = !!profile.custom_prompt_enabled;
+      $('systemPrompt').value = profile.system_prompt || '';
+      $('userPromptTemplate').value = profile.user_prompt_template || '';
+      syncPromptEditors();
+      $('inlineKeyNotice').textContent = profile.api_key_present ? '已保留本地 key' : 'secret 不回显';
+    }
+
+    function rebuildProfileOptions(payloadState) {
+      const activeName = getActiveProfileName(payloadState);
+      $('llmProfile').innerHTML = '';
+      getProfileNames(payloadState).forEach((name) => {
+        const option = document.createElement('option');
+        option.value = name;
+        option.textContent = name;
+        $('llmProfile').appendChild(option);
+      });
+      $('llmProfile').value = activeName;
+      $('deleteProfileBtn').disabled = getProfileNames(payloadState).length <= 1;
+    }
+
+    function switchLlmProfile(name) {
+      if (!state.data || !state.data.state) return;
+      syncEditorToActiveProfile(state.data.state);
+      if (!state.data.state.llm_profiles[name]) return;
+      state.data.state.llm_active_profile = name;
+      rebuildProfileOptions(state.data.state);
+      loadLlmEditor(getActiveProfile(state.data.state));
+      updateLiveSummary(collectState());
+    }
+
     function hotwordRow(entry = { value: '', aliases: [] }) {
       const wrapper = document.createElement('div');
       wrapper.className = 'hotword-row';
@@ -2025,50 +2277,35 @@ _DICTATION_UI_HTML = r"""<!doctype html>
 
     function collectState() {
       const rows = Array.from(document.querySelectorAll('.hotword-row'));
-      return {
-        transforms: {
-          fullwidth_to_halfwidth: $('fullwidthToHalfwidth').checked,
-          space_around_punct: $('spaceAroundPunct').checked,
-          space_between_cjk: $('spaceBetweenCjk').checked,
-          strip_trailing_punctuation: $('stripTrailingPunctuation').checked,
-        },
-        llm: {
-          enabled: $('llmEnabled').checked,
-          provider: $('llmProvider').value.trim(),
-          base_url: $('llmBaseUrl').value.trim(),
-          model: $('llmModel').value.trim(),
-          api_key_env: $('llmApiKeyEnv').value.trim(),
-          timeout_sec: readNumber('llmTimeoutSec', 20),
-          stream: $('llmStream').checked,
-          temperature: readNumber('llmTemperature', 0),
-          max_tokens: readOptionalInt('llmMaxTokens'),
-          prompt_preset: $('promptPreset').value.trim() || 'default',
-          custom_prompt_enabled: $('customPromptEnabled').checked,
-          system_prompt: $('systemPrompt').value,
-          user_prompt_template: $('userPromptTemplate').value,
-          api_key_present: Boolean(state.data && state.data.state && state.data.state.llm && state.data.state.llm.api_key_present),
-        },
-        context: {
-          enabled: $('contextEnabled').checked,
-          max_chars: readNumber('contextMaxChars', 1200),
-          capture_budget_ms: readNumber('contextCaptureBudgetMs', 1200),
-        },
-        hotwords: {
-          enabled: $('hotwordsEnabled').checked,
-          rewrite_aliases: $('rewriteAliases').checked,
-          case_sensitive: $('caseSensitive').checked,
-          entries: rows
-            .map((row) => ({
-              value: row.querySelector('.hotword-value').value.trim(),
-              aliases: row.querySelector('.hotword-aliases').value.split(',').map((item) => item.trim()).filter(Boolean),
-            }))
-            .filter((entry) => entry.value),
-        },
-        hints: {
-          enabled: $('hintsEnabled').checked,
-          items: $('hintsInput').value.split('\n').map((item) => item.trim()).filter(Boolean),
-        },
+      const nextState = state.data && state.data.state ? cloneJson(state.data.state) : createEmptyState();
+      syncEditorToActiveProfile(nextState);
+      nextState.transforms = {
+        fullwidth_to_halfwidth: $('fullwidthToHalfwidth').checked,
+        space_around_punct: $('spaceAroundPunct').checked,
+        space_between_cjk: $('spaceBetweenCjk').checked,
+        strip_trailing_punctuation: $('stripTrailingPunctuation').checked,
       };
+      nextState.context = {
+        enabled: $('contextEnabled').checked,
+        max_chars: readNumber('contextMaxChars', 1200),
+        capture_budget_ms: readNumber('contextCaptureBudgetMs', 1200),
+      };
+      nextState.hotwords = {
+        enabled: $('hotwordsEnabled').checked,
+        rewrite_aliases: $('rewriteAliases').checked,
+        case_sensitive: $('caseSensitive').checked,
+        entries: rows
+          .map((row) => ({
+            value: row.querySelector('.hotword-value').value.trim(),
+            aliases: row.querySelector('.hotword-aliases').value.split(',').map((item) => item.trim()).filter(Boolean),
+          }))
+          .filter((entry) => entry.value),
+      };
+      nextState.hints = {
+        enabled: $('hintsEnabled').checked,
+        items: $('hintsInput').value.split('\n').map((item) => item.trim()).filter(Boolean),
+      };
+      return nextState;
     }
 
     function updateLiveSummary(current = state.data ? collectState() : null) {
@@ -2076,17 +2313,19 @@ _DICTATION_UI_HTML = r"""<!doctype html>
 
       const hotwordCount = (current.hotwords.entries || []).filter((entry) => entry.value).length;
       const hintCount = (current.hints.items || []).filter(Boolean).length;
-      const modelLabel = normalizeInline(current.llm.model) || normalizeInline(current.llm.provider) || '未填写';
-      const preset = findPromptPreset(current.llm.prompt_preset);
-      const presetLabel = current.llm.custom_prompt_enabled ? '自定义' : (preset ? preset.label : current.llm.prompt_preset);
+      const currentProfile = getActiveProfile(current);
+      const profileName = getActiveProfileName(current);
+      const modelLabel = normalizeInline(currentProfile.model) || normalizeInline(currentProfile.provider) || '未填写';
+      const preset = findPromptPreset(currentProfile.prompt_preset);
+      const presetLabel = currentProfile.custom_prompt_enabled ? '自定义' : (preset ? preset.label : currentProfile.prompt_preset);
 
-      $('rewriteSummary').textContent = current.llm.enabled ? presetLabel : '关闭';
-      $('modelSummary').textContent = modelLabel;
+      $('rewriteSummary').textContent = currentProfile.enabled ? presetLabel : '关闭';
+      $('modelSummary').textContent = `${profileName} · ${modelLabel}`;
       $('contextSummary').textContent = current.context.enabled ? `${current.context.max_chars} 字` : '关闭';
       $('lexiconSummary').textContent = `${hotwordCount} 热词 · ${hintCount} 提示`;
       $('runSummary').textContent = '日志';
 
-      $('inlineKeyNotice').textContent = current.llm.api_key_present ? '已保留本地 key' : 'secret 不回显';
+      $('inlineKeyNotice').textContent = currentProfile.api_key_present ? '已保留本地 key' : 'secret 不回显';
     }
 
     function renderState(payload) {
@@ -2103,15 +2342,6 @@ _DICTATION_UI_HTML = r"""<!doctype html>
       $('spaceBetweenCjk').checked = !!current.transforms.space_between_cjk;
       $('stripTrailingPunctuation').checked = !!current.transforms.strip_trailing_punctuation;
 
-      $('llmEnabled').checked = !!current.llm.enabled;
-      $('llmProvider').value = current.llm.provider || 'openai-compatible';
-      $('llmBaseUrl').value = current.llm.base_url || '';
-      $('llmModel').value = current.llm.model || '';
-      $('llmApiKeyEnv').value = current.llm.api_key_env || '';
-      $('llmTimeoutSec').value = current.llm.timeout_sec ?? 20.0;
-      $('llmStream').checked = !!current.llm.stream;
-      $('llmTemperature').value = current.llm.temperature ?? 0.0;
-      $('llmMaxTokens').value = current.llm.max_tokens ?? '';
       $('promptPreset').innerHTML = '';
       (payload.prompt_presets || []).forEach((preset) => {
         const option = document.createElement('option');
@@ -2119,11 +2349,8 @@ _DICTATION_UI_HTML = r"""<!doctype html>
         option.textContent = preset.label;
         $('promptPreset').appendChild(option);
       });
-      $('promptPreset').value = current.llm.prompt_preset || 'default';
-      $('customPromptEnabled').checked = !!current.llm.custom_prompt_enabled;
-      $('systemPrompt').value = current.llm.system_prompt || '';
-      $('userPromptTemplate').value = current.llm.user_prompt_template || '';
-      syncPromptEditors();
+      rebuildProfileOptions(current);
+      loadLlmEditor(getActiveProfile(current));
 
       $('contextEnabled').checked = !!current.context.enabled;
       $('contextMaxChars').value = current.context.max_chars ?? 1200;
@@ -2253,6 +2480,64 @@ _DICTATION_UI_HTML = r"""<!doctype html>
       $('hotwordList').appendChild(row);
       row.querySelector('.hotword-value').focus();
       updateLiveSummary();
+    });
+
+    $('llmProfile').addEventListener('change', () => {
+      switchLlmProfile($('llmProfile').value);
+    });
+
+    $('addProfileBtn').addEventListener('click', () => {
+      if (!state.data || !state.data.state) return;
+      syncEditorToActiveProfile(state.data.state);
+      const suggested = `profile-${getProfileNames(state.data.state).length + 1}`;
+      const name = normalizeInline(window.prompt('新配置集名称', suggested) || '');
+      if (!name) return;
+      if (state.data.state.llm_profiles[name]) {
+        setStatus('这个配置集已经存在');
+        return;
+      }
+      state.data.state.llm_profiles[name] = defaultProfileState(name);
+      state.data.state.llm_active_profile = name;
+      rebuildProfileOptions(state.data.state);
+      loadLlmEditor(getActiveProfile(state.data.state));
+      updateLiveSummary(collectState());
+    });
+
+    $('duplicateProfileBtn').addEventListener('click', () => {
+      if (!state.data || !state.data.state) return;
+      syncEditorToActiveProfile(state.data.state);
+      const currentName = getActiveProfileName(state.data.state);
+      const suggested = `${currentName}-copy`;
+      const name = normalizeInline(window.prompt('复制到新的配置集名称', suggested) || '');
+      if (!name) return;
+      if (state.data.state.llm_profiles[name]) {
+        setStatus('这个配置集已经存在');
+        return;
+      }
+      state.data.state.llm_profiles[name] = cloneJson(getActiveProfile(state.data.state));
+      state.data.state.llm_active_profile = name;
+      rebuildProfileOptions(state.data.state);
+      loadLlmEditor(getActiveProfile(state.data.state));
+      updateLiveSummary(collectState());
+    });
+
+    $('deleteProfileBtn').addEventListener('click', () => {
+      if (!state.data || !state.data.state) return;
+      const names = getProfileNames(state.data.state);
+      if (names.length <= 1) {
+        setStatus('至少保留一个配置集');
+        return;
+      }
+      const currentName = getActiveProfileName(state.data.state);
+      if (!window.confirm(`删除配置集 “${currentName}”？`)) {
+        return;
+      }
+      syncEditorToActiveProfile(state.data.state);
+      delete state.data.state.llm_profiles[currentName];
+      state.data.state.llm_active_profile = getProfileNames(state.data.state)[0];
+      rebuildProfileOptions(state.data.state);
+      loadLlmEditor(getActiveProfile(state.data.state));
+      updateLiveSummary(collectState());
     });
 
     $('promptPreset').addEventListener('change', () => {
